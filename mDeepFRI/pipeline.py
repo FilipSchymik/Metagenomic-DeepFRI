@@ -30,7 +30,7 @@ logger.setLevel(logging.INFO)
 
 
 # load sequences in query filtered by length
-def load_query_file(query_file: str, min_length: int = None, max_length=None):
+def load_query_file(query_file: str, min_length: int = None, max_length: int = None):
     query_file = QueryFile(filepath=query_file)
     query_file.load_sequences()
     # filter out sequences

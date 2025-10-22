@@ -43,7 +43,7 @@ def search_options(function):
         "--input",
         required=True,
         type=click.Path(exists=True),
-        help="Path to an input protein sequences (FASTA file, may be gzipped).",
+        help="Path to an input protein fasta file (FASTA file, may be gzipped).",
     )(function)
     function = click.option(
         "-o",
@@ -58,7 +58,7 @@ def search_options(function):
         required=True,
         type=click.Path(exists=True),
         multiple=True,
-        help="Path to a structures database compessed with FoldComp.",
+        help="Path to a structures database compressed with FoldComp.",
     )(function)
     function = click.option(
         "-s",
@@ -83,28 +83,28 @@ def search_options(function):
         help="Maximum length of the protein sequence.",
     )(function)
     function = click.option(
-        "--mmseqs-min-bits",
+        "--min-bitscore",
         required=False,
         default=0,
         type=float,
         help="Minimum bitscore for MMseqs2 alignment.",
     )(function)
     function = click.option(
-        "--mmseqs-max-eval",
+        "--max-eval",
         required=False,
         default=0.001,
         type=float,
         help="Maximum e-value for MMseqs2 alignment.",
     )(function)
     function = click.option(
-        "--mmseqs-min-ident",
+        "--min_identity",
         required=False,
         default=0.5,
         type=float,
         help="Minimum identity for MMseqs2 alignment.",
     )(function)
     function = click.option(
-        "--mmseqs-min-coverage",
+        "--min-coverage",
         required=False,
         default=0.9,
         type=float,
@@ -114,7 +114,7 @@ def search_options(function):
     function = click.option(
         "--top-k",
         required=False,
-        default=5,
+        default=1,
         type=int,
         help="Number of top MMSeqs2 hits to save. Default is 1.",
     )(function)
@@ -146,7 +146,7 @@ def search_options(function):
         "--tmpdir",
         required=False,
         default=None,
-        type=click.Path(exists=False),
+        type=click.Path(),
         help="Path to a temporary directory. Required for very large searches",
     )(function)
     return function
@@ -173,7 +173,7 @@ def main(debug):
     "--output",
     required=True,
     type=click.Path(exists=False),
-    help="Path to folder where the database will be created.",
+    help="Path to folder where the weights will be stored.",
 )
 @click.option("-v",
               "--version",
@@ -215,8 +215,6 @@ def generate_config(weights_path, version):
 
     logger.info("Generating config file for mDeepFRI.")
     weights_path = Path(weights_path)
-    if not weights_path.exists():
-        raise UsageError(f"Path {weights_path} does not exist.")
     generate_config_json(weights_path, version)
     logger.info(f"Config file generated in {weights_path}.")
 
@@ -224,7 +222,7 @@ def generate_config(weights_path, version):
 @main.command
 @search_options
 def search_databases(input, output, db_path, sensitivity, min_length,
-                     max_length, min_bits, max_eval, min_ident, min_coverage,
+                     max_length, min_bitscore, max_eval, min_ident, min_coverage,
                      top_k, overwrite, threads, skip_pdb, tmpdir):
     """
     Hierarchically search FoldComp databases for similar proteins with
@@ -239,7 +237,7 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     logger.info("Sensitivity:                  %s", sensitivity)
     logger.info("Minimum length:               %s", min_length)
     logger.info("Maximum length:               %s", max_length)
-    logger.info("Minimum bitscore:             %s", min_bits)
+    logger.info("Minimum bitscore:             %s", min_bitscore)
     logger.info("Maximum e-value:              %s", max_eval)
     logger.info("Minimum identity:             %s", min_ident)
     logger.info("Minimum coverage:             %s", min_coverage)
@@ -253,9 +251,7 @@ def search_databases(input, output, db_path, sensitivity, min_length,
                                  databases=db_path,
                                  output_path=output,
                                  sensitivity=sensitivity,
-                                 min_seq_len=min_length,
-                                 max_seq_len=max_length,
-                                 min_bits=min_bits,
+                                 min_bits=min_bitscore,
                                  max_eval=max_eval,
                                  min_ident=min_ident,
                                  min_coverage=min_coverage,
@@ -278,11 +274,11 @@ def search_databases(input, output, db_path, sensitivity, min_length,
 @click.option(
     "-p",
     "--processing-modes",
-    default=["bp", "cc", "ec", "mf"],
+    default=("bp", "cc", "ec", "mf"),
     type=click.Choice(["bp", "cc", "ec", "mf"]),
     multiple=True,
     help="Processing modes. Default is all"
-    "(biological process, cellular component, enzyme comission, molecular function).",
+    "(biological process, cellular component, enzyme commission, molecular function).",
 )
 @click.option(
     "-a",
@@ -310,13 +306,13 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     help="Gap extend penalty for contact map alignment.",
 )
 @click.option(
-    "--alignment-min-identity",
+    "--cmap-identity",
     default=0.5,
     type=float,
     help="Minimum identity for contact map alignment.",
 )
 @click.option(
-    "--alignment-min-coverage",
+    "--cmap-coverage",
     default=0.9,
     type=float,
     help="Minimum coverage for contact map alignment.",
@@ -327,20 +323,6 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     type=bool,
     is_flag=True,
     help="Remove intermediate files.",
-)
-@click.option(
-    "-t",
-    "--threads",
-    default=1,
-    type=int,
-    help="Number of threads to use. Default is 1.",
-)
-@click.option(
-    "--skip-pdb",
-    default=False,
-    type=bool,
-    is_flag=True,
-    help="Skip PDB100 database search.",
 )
 @click.option(
     "--save-structures",
@@ -356,14 +338,14 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     is_flag=True,
     help="Save contact maps of the top hits.",
 )
-@click.pass_context
-def predict_function(ctx, input, db_path, weights, output, processing_modes,
+
+def predict_function(input, db_path, weights, output, processing_modes,
                      angstrom_contact_thresh, generate_contacts,
-                     mmseqs_sensitivity, mmseqs_min_bitscore,
-                     mmseqs_max_evalue, mmseqs_min_identity,
-                     mmseqs_min_coverage, top_k, alignment_gap_open,
-                     alignment_gap_extend, alignment_min_identity,
-                     alignment_min_coverage, remove_intermediate, overwrite,
+                     sensitivity, min_bitscore,
+                     max_eval, min_identity,
+                     min_coverage, top_k, alignment_gap_open,
+                     alignment_gap_extend, cmap_identity, tmpdir,
+                     cmap_coverage, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length,
                      save_structures, save_cmaps):
     """Predict protein function from sequence."""
@@ -380,39 +362,43 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
     logger.info("Processing modes:              %s", processing_modes)
     logger.info("Angstrom contact threshold:    %s", angstrom_contact_thresh)
     logger.info("Generate contacts:             %s", generate_contacts)
-    logger.info("MMSeqs2 sensitivity:           %s", mmseqs_sensitivity)
-    logger.info("MMSeqs2 minimum bitscore:      %s", mmseqs_min_bitscore)
-    logger.info("MMSeqs2 maximum e-value:       %s", mmseqs_max_evalue)
-    logger.info("MMSeqs2 minimum identity:      %s", mmseqs_min_identity)
-    logger.info("MMSeqs2 sensitivity:           %s", )
+    logger.info("MMSeqs2 sensitivity:           %s", sensitivity)
+    logger.info("MMSeqs2 minimum bitscore:      %s", min_bitscore)
+    logger.info("MMSeqs2 maximum e-value:       %s", max_eval)
+    logger.info("MMSeqs2 minimum identity:      %s", min_identity)
     logger.info("Top k results:                 %s", top_k)
     logger.info("Alignment gap open:            %s", alignment_gap_open)
     logger.info("Alignment gap extend:          %s", alignment_gap_extend)
-    logger.info("Alignment minimum identity:    %s", alignment_min_identity)
+    logger.info("Alignment minimum identity:    %s", cmap_identity)
+    logger.info("Alignment minimum coverage:    %s", cmap_coverage)
     logger.info("Remove intermediate:           %s", remove_intermediate)
     logger.info("Overwrite:                     %s", overwrite)
     logger.info("Threads:                       %s", threads)
+    logger.info("Temporary dir:                 %s", tmpdir)
     logger.info("Skip PDB:                      %s", skip_pdb)
     logger.info("Minimum length:                %s", min_length)
     logger.info("Maximum length:                %s", max_length)
     logger.info("Save structures:               %s", save_structures)
     logger.info("Save contact maps:             %s", save_cmaps)
 
-    query_file = load_query_file(input)
+    query_file = load_query_file(
+        query_file=input, 
+        min_length=min_length, 
+        max_length=max_length)
+    
     deepfri_dbs = hierarchical_database_search(
         query_file=query_file,
         output_path=output_path / "database_search",
         databases=db_path,
-        sensitivity=mmseqs_sensitivity,
-        min_seq_len=min_length,
-        max_seq_len=max_length,
-        min_bits=mmseqs_min_bitscore,
-        max_eval=mmseqs_max_evalue,
-        min_ident=mmseqs_min_identity,
-        min_coverage=mmseqs_min_coverage,
+        sensitivity=sensitivity,
+        min_bits=min_bitscore,
+        max_eval=max_eval,
+        min_ident=min_identity,
+        min_coverage=min_coverage,
         top_k=top_k,
         skip_pdb=skip_pdb,
         overwrite=overwrite,
+        tmpdir=tmpdir,
         threads=threads)
 
     predict_protein_function(
@@ -425,8 +411,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
         generate_contacts=generate_contacts,
         alignment_gap_open=alignment_gap_open,
         alignment_gap_continuation=alignment_gap_extend,
-        identity_threshold=alignment_min_identity,
-        alignment_min_coverage=alignment_min_coverage,
+        identity_threshold=cmap_identity,
+        alignment_min_coverage=cmap_coverage,
         remove_intermediate=remove_intermediate,
         save_structures=save_structures,
         save_cmaps=save_cmaps)
