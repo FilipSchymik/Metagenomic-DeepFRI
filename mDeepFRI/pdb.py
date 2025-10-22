@@ -129,12 +129,10 @@ def extract_calpha_coords(db: Database,
                           query_ids: list,
                           save_directory: str = None,
                           threads: int = 1) -> list:
-
+    
     if "pdb100" in db.name:
-        # add save option
-        if save_directory:
-            get_pdb_seq_coords_parallel = partial(
-                get_pdb_seq_coords, save_directory=save_directory)
+        get_pdb_seq_coords_parallel = partial(
+            get_pdb_seq_coords, save_directory=save_directory) if save_directory else get_pdb_seq_coords
 
         with Pool(threads) as p:
             results = p.starmap(get_pdb_seq_coords_parallel,
