@@ -1,5 +1,5 @@
 import json
-
+import gzip
 import numpy as np
 
 cimport numpy as np
@@ -77,9 +77,19 @@ cdef class Predictor(object):
             sess_options=session_options,
         )
 
-        # load parameters
-        with open(self.model_path.rsplit(".", 1)[0] + "_model_params.json") as json_file:
-            metadata = json.load(json_file)
+        # Determine metadata file path
+        meta_path = self.model_path.rsplit(".", 1)[0] + "_model_params.json"
+
+        # Try to detect if the file is gzipped
+        with open(meta_path, "rb") as f:
+            sig = f.read(2)
+
+        if sig == b"\x1f\x8b":  # gzip magic number
+            with gzip.open(meta_path, "rt", encoding="utf-8") as json_file:
+                metadata = json.load(json_file)
+        else:
+            with open(meta_path, "r", encoding="utf-8") as json_file:
+                metadata = json.load(json_file)
 
         self.gonames = np.asarray(metadata['gonames'])
         self.goterms = np.asarray(metadata['goterms'])
