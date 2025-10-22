@@ -55,7 +55,7 @@ def search_options(function):
     function = click.option(
         "-d",
         "--db-path",
-        required=True,
+        required=False,
         type=click.Path(exists=True),
         multiple=True,
         help="Path to a structures database compressed with FoldComp.",
@@ -412,7 +412,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
         alignment_gap_open=alignment_gap_open,
         alignment_gap_continuation=alignment_gap_extend,
         identity_threshold=cmap_identity,
-        alignment_min_coverage=cmap_coverage,
+        coverage_threshold=cmap_coverage,
         remove_intermediate=remove_intermediate,
         save_structures=save_structures,
         save_cmaps=save_cmaps)
