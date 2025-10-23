@@ -110,6 +110,26 @@ class MMseqsResult(np.recarray):
             >>> # save results
             >>> result.save("path/to/file.tsv")
     """
+    
+    MMSEQS_DTYPE = [
+        ("query",  "U200"),
+        ("target", "U200"),
+        ("fident", float),
+        ("alnlen", float),
+        ("mismatch", float),
+        ("gapopen", float),
+        ("qstart", float),
+        ("qend",   float),
+        ("tstart", float),
+        ("tend",   float),
+        ("qcov",   float),
+        ("tcov",   float),
+        ("evalue", float),
+        ("bits",   float),
+    ]
+    
+    BEST_DTYPE = MMSEQS_DTYPE + [("query_file","U300"), ("database_file","U300")]
+        
     def __init__(self, result_arr, query_fasta=None, database=None):
         self.result_arr = result_arr
         self.query_fasta = Path(query_fasta).resolve() if query_fasta else None
@@ -167,7 +187,7 @@ class MMseqsResult(np.recarray):
         if self.query_fasta:
             query_col = np.array([self.query_fasta] * len(self.result_arr),
                                  dtype="U")
-            self.result_arr = rfn.append_fields(self, "query_file", query_col)
+            self.result_arr = rfn.append_fields(self.result_arr, "query_file", query_col)
 
         # append database column to the result array
         if self.database:
@@ -323,7 +343,8 @@ class MMseqsResult(np.recarray):
         result_arr = np.genfromtxt(filepath,
                                    delimiter="\t",
                                    encoding="utf-8",
-                                   names=True)
+                                   names=True,
+                                   dtype=cls.MMSEQS_DTYPE)
         return cls(result_arr, query_fasta, database)
 
     @classmethod
@@ -345,7 +366,9 @@ class MMseqsResult(np.recarray):
         result_arr = np.genfromtxt(filepath,
                                    delimiter="\t",
                                    encoding="utf-8",
-                                   names=True)
+                                   names=True,
+                                   dtype=cls.BEST_DTYPE)
+        
         try:
             query_file = np.unique(result_arr["query_file"])[0]
         except IndexError:
