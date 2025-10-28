@@ -136,8 +136,8 @@ def hierarchical_database_search(query_file: QueryFile,
         # for large datasets.
         # PDB100 hits are aligned second time to experimental
         # structures in order to save failed contact map alignemnts.
-        if 'pdb100' not in db.name:
-            query_file.remove_sequences(unique_hits)
+        #if 'pdb100' not in db.name:
+            #query_file.remove_sequences(unique_hits)
 
     return dbs
 
