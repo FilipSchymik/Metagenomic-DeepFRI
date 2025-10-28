@@ -80,3 +80,9 @@ exclude = [
     "tests/",
     "docs/"
     ]
+
+[tool.setuptools.package-data]
+"mDeepFRI" = ["assets/*.pkl"]
+
+[tool.setuptools]
+include-package-data = true
