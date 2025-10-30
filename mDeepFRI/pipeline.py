@@ -48,6 +48,7 @@ def hierarchical_database_search(query_file: QueryFile,
                                  min_bits: float = 0,
                                  max_eval: float = 1e-5,
                                  min_ident: float = 0.5,
+                                 max_ident: float = 1.0,
                                  min_coverage: float = 0.9,
                                  top_k: int = 5,
                                  skip_pdb: bool = False,
@@ -93,7 +94,8 @@ def hierarchical_database_search(query_file: QueryFile,
 
         filtered = results.apply_filters(min_cov=min_coverage,
                                          min_bits=min_bits,
-                                         min_ident=min_ident)
+                                         min_ident=min_ident,
+                                         max_ident=max_ident)
 
         try:
             best_matches = filtered.find_best_matches(top_k, threads=threads)

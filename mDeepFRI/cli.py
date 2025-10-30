@@ -107,6 +107,13 @@ def search_options(function):
         help="Minimum identity for MMseqs2 alignment.",
     )(function)
     function = click.option(
+        "--max_identity",
+        required=False,
+        default=1.0,
+        type=float,
+        help="Maximum identity for MMseqs2 alignment. Lower to pass worse hits.",
+    )(function)
+    function = click.option(
         "--min-coverage",
         required=False,
         default=0.9,
@@ -345,7 +352,7 @@ def search_databases(input, output, db_path, sensitivity, min_length,
 def predict_function(input, db_path, weights, output, processing_modes,
                      angstrom_contact_thresh, generate_contacts,
                      sensitivity, min_bitscore,
-                     max_eval, min_identity,
+                     max_eval, min_identity, max_identity,
                      min_coverage, top_k, alignment_gap_open,
                      alignment_gap_extend, cmap_identity, tmpdir,
                      cmap_coverage, remove_intermediate, overwrite,
@@ -369,6 +376,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
     logger.info("MMSeqs2 minimum bitscore:      %s", min_bitscore)
     logger.info("MMSeqs2 maximum e-value:       %s", max_eval)
     logger.info("MMSeqs2 minimum identity:      %s", min_identity)
+    logger.info("MMSeqs2 maximum identity:      %s", max_identity)
     logger.info("Top k results:                 %s", top_k)
     logger.info("Alignment gap open:            %s", alignment_gap_open)
     logger.info("Alignment gap extend:          %s", alignment_gap_extend)
@@ -397,6 +405,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
         min_bits=min_bitscore,
         max_eval=max_eval,
         min_ident=min_identity,
+        max_ident=max_identity,
         min_coverage=min_coverage,
         top_k=top_k,
         skip_pdb=skip_pdb,
@@ -416,6 +425,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
         alignment_gap_continuation=alignment_gap_extend,
         identity_threshold=cmap_identity,
         coverage_threshold=cmap_coverage,
+        threads=threads,
         remove_intermediate=remove_intermediate,
         save_structures=save_structures,
         save_cmaps=save_cmaps)

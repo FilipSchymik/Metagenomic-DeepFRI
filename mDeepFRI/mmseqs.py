@@ -213,7 +213,8 @@ class MMseqsResult(np.recarray):
     def apply_filters(self,
                       min_cov: float = 0.0,
                       min_ident: float = 0.0,
-                      min_bits: float = 0) -> "MMseqsResult":
+                      min_bits: float = 0,
+                      max_ident: float = 1.0) -> "MMseqsResult":
         """
         Filter search results optionally by coverage, identity and bit score.
 
@@ -232,7 +233,7 @@ class MMseqsResult(np.recarray):
         """
 
         mask = (self.result_arr["qcov"] >= min_cov) & (self.result_arr["tcov"] >= min_cov) & \
-                (self.result_arr["fident"] >= min_ident) & (self.result_arr["bits"] >= min_bits)
+                (self.result_arr["fident"] >= min_ident) & (self.result_arr["fident"] <= max_ident) & (self.result_arr["bits"] >= min_bits)
 
         return self.apply_mask(mask)
 
