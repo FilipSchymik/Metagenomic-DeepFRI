@@ -2,6 +2,8 @@ import importlib.metadata
 import logging
 import sys
 from pathlib import Path
+import os
+import numpy as np
 
 import click
 from click._compat import get_text_stderr
@@ -11,6 +13,7 @@ from click.utils import echo
 from mDeepFRI.pipeline import (hierarchical_database_search, load_query_file,
                                predict_protein_function)
 from mDeepFRI.utils import download_model_weights, generate_config_json
+from mDeepFRI.bio_utils import load_structure, get_residues_coordinates, calculate_contact_map
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler(sys.stdout)
@@ -417,6 +420,26 @@ def predict_function(input, db_path, weights, output, processing_modes,
         save_structures=save_structures,
         save_cmaps=save_cmaps)
 
+
+@main.command()
+@click.option("--input_dir", "-i", type=click.Path(exists=True), required=True,
+              help="Directory containing PDB or mmCIF files.")
+@click.option("--output_dir", "-o", type=click.Path(), required=True,
+              help="Directory to save computed contact maps.")
+@click.option("--threshold", "-t", default=6.0, show_default=True,
+              help="Distance threshold in Å for contact map.")
+def make_cmaps(input_dir, output_dir, threshold):
+    "Compute CA contact maps for all PDB/mmCIF files in a directory."
+    os.makedirs(output_dir, exist_ok=True)
+    for fname in os.listdir(input_dir):
+        if not fname.endswith((".pdb", ".cif")):
+            continue
+        filetype = "pdb" if fname.endswith(".pdb") else "mmcif"
+        with open(os.path.join(input_dir, fname)) as f:
+            structure_str = f.read()
+        residues, coords = get_residues_coordinates(load_structure(structure_str, filetype), chain="A")
+        cmap = calculate_contact_map(coords, threshold)
+        np.save(os.path.join(output_dir, fname.replace(".pdb", "_cmap.npy")), cmap)
 
 if __name__ == "__main__":
     main()
