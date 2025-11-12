@@ -213,8 +213,7 @@ class MMseqsResult(np.recarray):
     def apply_filters(self,
                       min_cov: float = 0.0,
                       min_ident: float = 0.0,
-                      min_bits: float = 0,
-                      max_ident: float = 1.0) -> "MMseqsResult":
+                      min_bits: float = 0) -> "MMseqsResult":
         """
         Filter search results optionally by coverage, identity and bit score.
 
@@ -233,7 +232,7 @@ class MMseqsResult(np.recarray):
         """
 
         mask = (self.result_arr["qcov"] >= min_cov) & (self.result_arr["tcov"] >= min_cov) & \
-                (self.result_arr["fident"] >= min_ident) & (self.result_arr["fident"] <= max_ident) & (self.result_arr["bits"] >= min_bits)
+                (self.result_arr["fident"] >= min_ident) & (self.result_arr["bits"] >= min_bits)
 
         return self.apply_mask(mask)
 
@@ -659,3 +658,107 @@ def extract_fasta_foldcomp(foldcomp_db: str,
         pass
 
     return Path(str(output_file) + ".gz")
+
+
+def filter_mmseqs_best_matches(
+    best_matches_path: str,
+    *,
+    ident_low: float | None = None,
+    ident_high: float | None = None,
+    ident_max: float | None = None,
+    min_qcov: float = 0.0,
+    min_tcov: float = 0.0,
+    drop_self_hits: bool = True,
+    per_query: str = "topbits",  # "topbits" or "random"
+    seed: int = 0,
+    out_path: str | None = None,
+) -> str:
+    """
+    Post-filter an existing best-matches TSV by identity/coverage and keep one hit per query.
+
+    Returns
+    -------
+    str
+        Path to a new TSV with the same BEST_DTYPE layout.
+    """
+    res = MMseqsResult.from_best_matches(best_matches_path)
+    R = res.result_arr
+
+    # Handle empty results - np.genfromtxt may return 0-d array for empty files
+    if R.ndim == 0 or R.size == 0:
+        out_path = out_path or (Path(best_matches_path).with_suffix("").as_posix() + ".filtered.tsv")
+        empty_arr = np.array([], dtype=MMseqsResult.BEST_DTYPE)
+        empty_res = MMseqsResult(empty_arr, res.query_fasta, res.database)
+        empty_res.query_fasta = None
+        empty_res.database = None
+        empty_res.save(out_path)
+        return str(out_path)
+
+    mask = (R["qcov"] >= min_qcov) & (R["tcov"] >= min_tcov)
+
+    if ident_low is not None and ident_high is not None:
+        mask &= (R["fident"] >= ident_low) & (R["fident"] < ident_high)
+    elif ident_max is not None:
+        mask &= (R["fident"] <= ident_max)
+
+    # self-hit removal for AFDB IDs
+    if drop_self_hits:
+        # target starts with f"AF-{query}-"
+        af_self = np.fromiter(
+            (str(t).startswith(f"AF-{str(q)}-") for q,t in zip(R["query"], R["target"])),
+            dtype=bool, count=len(R)
+        )
+        mask &= ~af_self
+
+    Rf = R[mask]
+
+    if Rf.size == 0:
+        out_path = out_path or (Path(best_matches_path).with_suffix("").as_posix() + ".filtered.tsv")
+        empty_arr = np.array([], dtype=MMseqsResult.BEST_DTYPE)
+        empty_res = MMseqsResult(empty_arr, res.query_fasta, res.database)
+        empty_res.query_fasta = None
+        empty_res.database = None
+        empty_res.save(out_path)
+        return out_path
+
+    # collapse to one hit per query
+    kept_rows = []
+    if per_query == "random":
+        rng = np.random.default_rng(seed)
+        for q in np.unique(Rf["query"]):
+            hits = Rf[Rf["query"] == q]
+            kept_rows.append(hits[rng.integers(0, len(hits))])
+    else:
+        order = np.argsort(Rf, order=("query", "bits", "fident"), kind="mergesort")
+        Rf_sorted = Rf[order][::-1]
+        for q in np.unique(Rf_sorted["query"]):
+            hits = Rf_sorted[Rf_sorted["query"] == q]
+            kept_rows.append(hits[0])
+
+    kept_arr = np.asarray(kept_rows, dtype=MMseqsResult.BEST_DTYPE)
+    kept = MMseqsResult(kept_arr, res.query_fasta, res.database)
+    kept.query_fasta = None
+    kept.database = None
+
+    if out_path is None:
+        base = Path(best_matches_path).with_suffix("")
+        tag = []
+        if ident_low is not None and ident_high is not None:
+            tag.append(f"bin_{ident_low:.2f}-{ident_high:.2f}")
+        if ident_max is not None:
+            tag.append(f"max_{ident_max:.2f}")
+        tag.append(f"cov_{min_qcov:.2f}-{min_tcov:.2f}")
+        tag.append(f"sel_{per_query}")
+        if per_query == "random":
+            tag.append(f"seed{seed}")
+        out_path = base.parent / f"{base.name}__{'__'.join(tag)}.tsv"
+
+    kept.save(out_path)
+
+    if per_query == "random":
+        log_path = Path(out_path).with_suffix(".log")
+        with open(log_path, "w") as fh:
+            for row in kept_rows:
+                fh.write(f"{row['query']}\t{row['target']}\t{row['fident']:.3f}\n")
+
+    return str(out_path)

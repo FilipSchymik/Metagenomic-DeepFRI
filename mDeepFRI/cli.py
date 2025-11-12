@@ -1,4 +1,5 @@
 import importlib.metadata
+import itertools
 import logging
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from mDeepFRI.pipeline import (hierarchical_database_search, load_query_file,
                                predict_protein_function)
 from mDeepFRI.utils import download_model_weights, generate_config_json
 from mDeepFRI.bio_utils import load_structure, get_residues_coordinates, calculate_contact_map
+from mDeepFRI.database import Database
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler(sys.stdout)
@@ -105,13 +107,6 @@ def search_options(function):
         default=0.5,
         type=float,
         help="Minimum identity for MMseqs2 alignment.",
-    )(function)
-    function = click.option(
-        "--max_identity",
-        required=False,
-        default=1.0,
-        type=float,
-        help="Maximum identity for MMseqs2 alignment. Lower to pass worse hits.",
     )(function)
     function = click.option(
         "--min-coverage",
@@ -232,7 +227,7 @@ def generate_config(weights_path, version):
 @main.command
 @search_options
 def search_databases(input, output, db_path, sensitivity, min_length,
-                     max_length, min_bitscore, max_eval, min_ident, min_coverage,
+                     max_length, min_bitscore, max_eval, min_identity, min_coverage,
                      top_k, overwrite, threads, skip_pdb, tmpdir):
     """
     Hierarchically search FoldComp databases for similar proteins with
@@ -249,7 +244,7 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     logger.info("Maximum length:               %s", max_length)
     logger.info("Minimum bitscore:             %s", min_bitscore)
     logger.info("Maximum e-value:              %s", max_eval)
-    logger.info("Minimum identity:             %s", min_ident)
+    logger.info("Minimum identity:             %s", min_identity)
     logger.info("Minimum coverage:             %s", min_coverage)
     logger.info("Top k results:                %s", top_k)
     logger.info("Overwrite:                    %s", overwrite)
@@ -263,7 +258,7 @@ def search_databases(input, output, db_path, sensitivity, min_length,
                                  sensitivity=sensitivity,
                                  min_bits=min_bitscore,
                                  max_eval=max_eval,
-                                 min_ident=min_ident,
+                                 min_ident=min_identity,
                                  min_coverage=min_coverage,
                                  top_k=top_k,
                                  skip_pdb=skip_pdb,
@@ -299,9 +294,10 @@ def search_databases(input, output, db_path, sensitivity, min_length,
 )
 @click.option(
     "--generate-contacts",
-    default=2,
+    default=(2,),
+    multiple=True,
     type=int,
-    help="Gap fill threshold during contact map alignment.",
+    help="Gap fill threshold during contact map alignment. Can be specified multiple times (e.g., --generate-contacts 0 --generate-contacts 1 --generate-contacts 2).",
 )
 @click.option(
     "--alignment-gap-open",
@@ -348,16 +344,27 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     is_flag=True,
     help="Save contact maps of the top hits.",
 )
+@click.option("--identity-bin", default=None, multiple=True, type=str,
+              help="Identity bin as 'low,high' (e.g. '0.80,0.90'). Can be specified multiple times (e.g., --identity-bin 0.9,1.0 --identity-bin 0.8,0.9).")
+@click.option("--identity-max", default=None, type=float,
+              help="Keep hits with identity <= this value (e.g. 0.80).")
+@click.option("--per-query", default="topbits", type=click.Choice(["topbits", "random"]),
+              help="Collapse to one hit per query by top bitscore or random.")
+@click.option("--drop-self-hits/--keep-self-hits", default=True, help="Drop exact self matches.")
+@click.option("--seed", default=0, type=int, help="Random seed if per-query=random.")
+@click.option("--precomputed-tsv", type=click.Path(exists=True),
+              help="Use a precomputed MMseqs2 best-match TSV instead of running a new search.")
 
 def predict_function(input, db_path, weights, output, processing_modes,
                      angstrom_contact_thresh, generate_contacts,
                      sensitivity, min_bitscore,
-                     max_eval, min_identity, max_identity,
+                     max_eval, min_identity,
                      min_coverage, top_k, alignment_gap_open,
                      alignment_gap_extend, cmap_identity, tmpdir,
                      cmap_coverage, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length,
-                     save_structures, save_cmaps):
+                     save_structures, save_cmaps, identity_bin, 
+                     identity_max, per_query, drop_self_hits, seed, precomputed_tsv):
     """Predict protein function from sequence."""
     logger.info("Starting Metagenomic-DeepFRI.")
 
@@ -376,7 +383,6 @@ def predict_function(input, db_path, weights, output, processing_modes,
     logger.info("MMSeqs2 minimum bitscore:      %s", min_bitscore)
     logger.info("MMSeqs2 maximum e-value:       %s", max_eval)
     logger.info("MMSeqs2 minimum identity:      %s", min_identity)
-    logger.info("MMSeqs2 maximum identity:      %s", max_identity)
     logger.info("Top k results:                 %s", top_k)
     logger.info("Alignment gap open:            %s", alignment_gap_open)
     logger.info("Alignment gap extend:          %s", alignment_gap_extend)
@@ -391,44 +397,124 @@ def predict_function(input, db_path, weights, output, processing_modes,
     logger.info("Maximum length:                %s", max_length)
     logger.info("Save structures:               %s", save_structures)
     logger.info("Save contact maps:             %s", save_cmaps)
-
+    
+    # Parse identity_bin list
+    identity_bins = []
+    if identity_bin:
+        for ib in identity_bin:
+            try:
+                low, high = map(float, ib.split(","))
+                identity_bins.append((low, high))
+            except Exception:
+                raise UsageError(f"--identity-bin must look like '0.80,0.90', got '{ib}'")
+    else:
+        identity_bins = [None]
+    
+    # Convert generate_contacts to list (click multiple returns tuple)
+    if isinstance(generate_contacts, (tuple, list)):
+        generate_contacts_list = list(generate_contacts)
+    else:
+        generate_contacts_list = [generate_contacts]
+    
+    logger.info("Identity bins:                 %s", identity_bins)
+    logger.info("Generate contacts values:      %s", generate_contacts_list)
+    
+    # Warn if using identity bins with low top-k
+    if identity_bins != [None] and top_k < len(identity_bins):
+        logger.warning(
+            "You are using %d identity bin(s) but --top-k is only %d. "
+            "Consider increasing --top-k to ensure hits are available for all identity bins. "
+            "Recommended: --top-k %d or higher.",
+            len(identity_bins), top_k, len(identity_bins) * 2
+        )
+    
+    # Load query file once
     query_file = load_query_file(
         query_file=input, 
         min_length=min_length, 
         max_length=max_length)
     
-    deepfri_dbs = hierarchical_database_search(
-        query_file=query_file,
-        output_path=output_path / "database_search",
-        databases=db_path,
-        sensitivity=sensitivity,
-        min_bits=min_bitscore,
-        max_eval=max_eval,
-        min_ident=min_identity,
-        max_ident=max_identity,
-        min_coverage=min_coverage,
-        top_k=top_k,
-        skip_pdb=skip_pdb,
-        overwrite=overwrite,
-        tmpdir=tmpdir,
-        threads=threads)
+    def _as_single_db_prefix(db_path):
+        if isinstance(db_path, (list, tuple)):
+            return Path(db_path[0])
+        return Path(db_path)
+    
+    # Run database search once
+    if precomputed_tsv:
+        db_prefix = _as_single_db_prefix(db_path) 
+        deepfri_dbs = [Database(
+            foldcomp_db=db_prefix,
+            sequence_db=db_prefix.with_suffix(".fasta.gz"),
+            mmseqs_db=db_prefix,
+            mmseqs_result=Path(precomputed_tsv)
+        )]
+    else:
+        deepfri_dbs = hierarchical_database_search(
+            query_file=query_file,
+            output_path=output_path / "database_search",
+            databases=db_path,
+            sensitivity=sensitivity,
+            min_bits=min_bitscore,
+            max_eval=max_eval,
+            min_ident=min_identity,
+            min_coverage=min_coverage,
+            top_k=top_k,
+            skip_pdb=skip_pdb,
+            overwrite=overwrite,
+            tmpdir=tmpdir,
+            threads=threads)
 
-    predict_protein_function(
-        query_file=query_file,
-        databases=deepfri_dbs,
-        weights=weights,
-        output_path=output_path,
-        deepfri_processing_modes=processing_modes,
-        angstrom_contact_threshold=angstrom_contact_thresh,
-        generate_contacts=generate_contacts,
-        alignment_gap_open=alignment_gap_open,
-        alignment_gap_continuation=alignment_gap_extend,
-        identity_threshold=cmap_identity,
-        coverage_threshold=cmap_coverage,
-        threads=threads,
-        remove_intermediate=remove_intermediate,
-        save_structures=save_structures,
-        save_cmaps=save_cmaps)
+    # Preserve original database result paths (they get modified in predict_protein_function)
+    original_db_paths = {db.name: db.mmseqs_result for db in deepfri_dbs}
+    
+    # Iterate over all combinations of identity_bin and generate_contacts
+    total_combinations = len(identity_bins) * len(generate_contacts_list)
+    logger.info("Running %d hyperparameter combinations", total_combinations)
+    
+    combinations = list(itertools.product(identity_bins, generate_contacts_list))
+    for idx, (ib, gen_contacts) in enumerate(combinations, 1):
+        # Restore original database result paths for each combination
+        for db in deepfri_dbs:
+            db.mmseqs_result = original_db_paths[db.name]
+        # Create output path suffix for this combination
+        if ib is not None:
+            suffix = f"_id{ib[0]:.2f}-{ib[1]:.2f}_gc{gen_contacts}"
+        else:
+            suffix = f"_gc{gen_contacts}"
+        
+        combo_output_path = output_path / f"results{suffix}"
+        combo_output_path.mkdir(parents=True, exist_ok=True)
+        
+        logger.info("=" * 80)
+        logger.info("Combination %d/%d: identity_bin=%s, generate_contacts=%d", 
+                   idx, total_combinations, ib, gen_contacts)
+        logger.info("Output path: %s", combo_output_path)
+        logger.info("=" * 80)
+        
+        # Only remove intermediate files after the last combination
+        remove_intermediate_this_iter = remove_intermediate and (idx == total_combinations)
+        
+        predict_protein_function(
+            query_file=query_file,
+            databases=deepfri_dbs,
+            weights=weights,
+            output_path=combo_output_path,
+            deepfri_processing_modes=processing_modes,
+            angstrom_contact_threshold=angstrom_contact_thresh,
+            generate_contacts=gen_contacts,
+            alignment_gap_open=alignment_gap_open,
+            alignment_gap_continuation=alignment_gap_extend,
+            identity_threshold=cmap_identity,
+            coverage_threshold=cmap_coverage,
+            identity_bin=ib,
+            identity_max=identity_max,
+            selection=per_query,
+            seed=seed,
+            drop_self_hits=drop_self_hits,
+            threads=threads,
+            remove_intermediate=remove_intermediate_this_iter,
+            save_structures=save_structures,
+            save_cmaps=save_cmaps)
 
 
 @main.command()

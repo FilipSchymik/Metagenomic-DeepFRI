@@ -3,6 +3,7 @@ import logging
 import pathlib
 import pickle
 import sys
+from pathlib import Path
 from functools import partial
 from multiprocessing import Pool
 from typing import Iterable, List, Tuple
@@ -18,6 +19,7 @@ from mDeepFRI.mmseqs import MMseqsResult, QueryFile
 from mDeepFRI.pdb import create_pdb_mmseqs, extract_calpha_coords
 from mDeepFRI.predict import Predictor
 from mDeepFRI.utils import load_deepfri_config, remove_intermediate_files
+from mDeepFRI.mmseqs import filter_mmseqs_best_matches
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler(sys.stdout)
@@ -48,7 +50,6 @@ def hierarchical_database_search(query_file: QueryFile,
                                  min_bits: float = 0,
                                  max_eval: float = 1e-5,
                                  min_ident: float = 0.5,
-                                 max_ident: float = 1.0,
                                  min_coverage: float = 0.9,
                                  top_k: int = 5,
                                  skip_pdb: bool = False,
@@ -94,8 +95,7 @@ def hierarchical_database_search(query_file: QueryFile,
 
         filtered = results.apply_filters(min_cov=min_coverage,
                                          min_bits=min_bits,
-                                         min_ident=min_ident,
-                                         max_ident=max_ident)
+                                         min_ident=min_ident)
 
         try:
             best_matches = filtered.find_best_matches(top_k, threads=threads)
@@ -149,21 +149,27 @@ def align_pairwise():
 
 
 def predict_protein_function(
-        query_file: QueryFile,
-        databases: Tuple[Database],
-        weights: str,
-        output_path: str,
-        deepfri_processing_modes: List[str] = ["ec", "bp", "mf", "cc"],
-        angstrom_contact_threshold: float = 6,
-        generate_contacts: int = 2,
-        alignment_gap_open: float = 10,
-        alignment_gap_continuation: float = 1,
-        identity_threshold: float = 0.5,
-        coverage_threshold: float = 0.9,
-        remove_intermediate=False,
-        threads: int = 1,
-        save_structures: bool = False,
-        save_cmaps: bool = False):
+    query_file: QueryFile,
+    databases: Tuple[Database],
+    weights: str,
+    output_path: str,
+    deepfri_processing_modes: List[str] = ["ec", "bp", "mf", "cc"],
+    angstrom_contact_threshold: float = 6,
+    generate_contacts: int = 2,
+    alignment_gap_open: float = 10,
+    alignment_gap_continuation: float = 1,
+    identity_threshold: float = 0.5,
+    coverage_threshold: float = 0.9,
+    remove_intermediate=False,
+    threads: int = 1,
+    save_structures: bool = False,
+    save_cmaps: bool = False,
+    identity_bin: tuple[float, float] | None = None,   # e.g. (0.80, 0.90)
+    identity_max: float | None = None,                 # e.g. 0.80  (cumulative)
+    selection: str = "topbits",                        # or "topbits"
+    seed: int = 0,
+    drop_self_hits: bool = True,
+):
 
     # load DeepFRI model
     deepfri_models_config = load_deepfri_config(weights)
@@ -184,7 +190,37 @@ def predict_protein_function(
 
     aligned_cmaps = []
     for db in databases:
+        if identity_bin or identity_max is not None:
+            filters_dir = (Path(output_path) / "identity_filters" / db.name)
+            filters_dir.mkdir(parents=True, exist_ok=True)
+
+            low, high = (identity_bin if identity_bin else (None, None))
+            filtered_tsv = filter_mmseqs_best_matches(
+                best_matches_path=db.mmseqs_result,
+                ident_low=low, ident_high=high,
+                ident_max=identity_max,
+                min_qcov=coverage_threshold,
+                min_tcov=coverage_threshold,
+                drop_self_hits=drop_self_hits,
+                per_query=selection,
+                seed=seed,
+                out_path=str(filters_dir / Path(db.mmseqs_result).name)
+            )
+            db.mmseqs_result = filtered_tsv  # downstream alignment reads this path
         # SEQUENCE ALIGNMENT
+        
+        bm = MMseqsResult.from_best_matches(db.mmseqs_result)
+        # Handle empty results - np.genfromtxt may return 0-d array for empty files
+        if bm.result_arr.ndim == 0:
+            # 0-d array (scalar) means empty result
+            num_rows = 0
+        else:
+            num_rows = len(bm.result_arr)
+        logger.info("Filtered best-matches rows for %s: %d", db.name, num_rows)
+
+        logger.info("sequence_db: %s (exists=%s)", db.sequence_db, db.sequence_db.exists())
+        logger.info("foldcomp_db: %s (exists=%s)", db.foldcomp_db, db.foldcomp_db.exists())
+        
         # calculate already aligned sequences
         alignments = align_mmseqs_results(
             best_matches_filepath=db.mmseqs_result,
