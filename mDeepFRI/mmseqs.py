@@ -369,13 +369,26 @@ class MMseqsResult(np.recarray):
                                    names=True,
                                    dtype=cls.BEST_DTYPE)
         
+        # Handle single-row files: np.genfromtxt returns 0-d array for single rows
+        # We need to ensure it's at least 1D
+        if result_arr.ndim == 0:
+            # Single row: convert to 1D array with shape (1,)
+            # For structured arrays, create a new array with the same dtype
+            # Extract all field values and create a new structured array
+            dtype = result_arr.dtype  # Get the actual dtype from the array
+            field_values = tuple([result_arr[field] for field in dtype.names])
+            result_arr = np.array([field_values], dtype=dtype)
+        elif result_arr.size == 0:
+            # Empty file: create empty array with correct dtype
+            result_arr = np.array([], dtype=cls.BEST_DTYPE)
+        
         try:
             query_file = np.unique(result_arr["query_file"])[0]
-        except IndexError:
+        except (IndexError, ValueError):
             query_file = None
         try:
             database = np.unique(result_arr["database_file"])[0]
-        except IndexError:
+        except (IndexError, ValueError):
             database = None
 
         return cls(result_arr, query_file, database)
@@ -701,13 +714,21 @@ def filter_mmseqs_best_matches(
     elif ident_max is not None:
         mask &= (R["fident"] <= ident_max)
 
-    # self-hit removal for AFDB IDs
+    # IMPORTANT: Remove self-hits BEFORE random selection to avoid selecting self-hits
+    # This ensures we only randomly select from valid (non-self) hits
+    num_before_self_filter = np.sum(mask)
     if drop_self_hits:
-        # target starts with f"AF-{query}-"
+        # Check for exact matches or target starts with f"AF-{query}-"
         af_self = np.fromiter(
-            (str(t).startswith(f"AF-{str(q)}-") for q,t in zip(R["query"], R["target"])),
+            (str(q) == str(t) or str(t).startswith(f"AF-{str(q)}-") for q,t in zip(R["query"], R["target"])),
             dtype=bool, count=len(R)
         )
+        num_self_hits = np.sum(mask & af_self)
+        if num_self_hits > 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("Removing %d self-hits before random selection (out of %d hits in identity bin)", 
+                       num_self_hits, num_before_self_filter)
         mask &= ~af_self
 
     Rf = R[mask]
@@ -722,17 +743,22 @@ def filter_mmseqs_best_matches(
         return out_path
 
     # collapse to one hit per query
+    # NOTE: Self-hits have already been removed above, so we're selecting from valid hits only
     kept_rows = []
     if per_query == "random":
         rng = np.random.default_rng(seed)
         for q in np.unique(Rf["query"]):
             hits = Rf[Rf["query"] == q]
+            if len(hits) == 0:
+                continue  # Skip queries with no valid hits after self-hit removal
             kept_rows.append(hits[rng.integers(0, len(hits))])
     else:
         order = np.argsort(Rf, order=("query", "bits", "fident"), kind="mergesort")
         Rf_sorted = Rf[order][::-1]
         for q in np.unique(Rf_sorted["query"]):
             hits = Rf_sorted[Rf_sorted["query"] == q]
+            if len(hits) == 0:
+                continue  # Skip queries with no valid hits after self-hit removal
             kept_rows.append(hits[0])
 
     kept_arr = np.asarray(kept_rows, dtype=MMseqsResult.BEST_DTYPE)

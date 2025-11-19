@@ -148,6 +148,203 @@ def align_pairwise():
     pass
 
 
+def prepare_alignments_for_identity_bin(
+    query_file: QueryFile,
+    databases: Tuple[Database],
+    identity_bin: tuple[float, float] | None = None,
+    identity_max: float | None = None,
+    alignment_gap_open: float = 10,
+    alignment_gap_continuation: float = 1,
+    identity_threshold: float = 0.5,
+    coverage_threshold: float = 0.9,
+    selection: str = "topbits",
+    seed: int = 0,
+    drop_self_hits: bool = True,
+    threads: int = 1,
+    save_structures: bool = False,
+    output_path: str = None,
+):
+    """
+    Prepare alignments and coordinates for a given identity bin.
+    This is expensive and only needs to be done once per identity bin.
+    
+    Returns:
+        dict: Dictionary mapping database names to lists of AlignmentResult objects with coordinates
+    """
+    output_path = Path(output_path) if output_path else None
+    all_alignments = {}
+    
+    # Determine identity bin name for organization (used in multiple places)
+    if output_path and identity_bin:
+        bin_name = f"identity_bin_{identity_bin[0]:.2f}-{identity_bin[1]:.2f}"
+    elif output_path:
+        bin_name = "identity_bin_all"
+    else:
+        bin_name = None
+    
+    for db in databases:
+        if identity_bin or identity_max is not None:
+            # Create organized directory for filtered MMSeqs2 results
+            if output_path:
+                filters_dir = output_path / "mmseqs2_filtered" / bin_name
+                filters_dir.mkdir(parents=True, exist_ok=True)
+                # Use meaningful filename
+                filtered_filename = f"{db.name}_filtered.tsv"
+                filtered_tsv_path = filters_dir / filtered_filename
+            else:
+                filters_dir = None
+                filtered_tsv_path = None
+
+            low, high = (identity_bin if identity_bin else (None, None))
+            filtered_tsv = filter_mmseqs_best_matches(
+                best_matches_path=db.mmseqs_result,
+                ident_low=low, ident_high=high,
+                ident_max=identity_max,
+                min_qcov=coverage_threshold,
+                min_tcov=coverage_threshold,
+                drop_self_hits=drop_self_hits,
+                per_query=selection,
+                seed=seed,
+                out_path=str(filtered_tsv_path) if filtered_tsv_path else None
+            )
+            db.mmseqs_result = filtered_tsv
+        
+        # SEQUENCE ALIGNMENT
+        logger.info("Reading filtered best-matches from: %s", db.mmseqs_result)
+        bm = MMseqsResult.from_best_matches(db.mmseqs_result)
+        if bm.result_arr.ndim == 0:
+            num_rows = 0
+        else:
+            num_rows = len(bm.result_arr)
+        logger.info("Filtered best-matches rows for %s: %d", db.name, num_rows)
+        
+        if num_rows == 0:
+            logger.warning("No matches found for %s after filtering (file: %s), skipping alignment.", 
+                          db.name, db.mmseqs_result)
+            # Check if file exists and has content
+            if Path(db.mmseqs_result).exists():
+                file_size = Path(db.mmseqs_result).stat().st_size
+                logger.warning("File exists with size %d bytes. This may indicate a parsing issue.", file_size)
+                # Try to read first few lines
+                try:
+                    with open(db.mmseqs_result, 'r') as f:
+                        first_lines = [f.readline().strip() for _ in range(3)]
+                    logger.warning("First lines of file: %s", first_lines)
+                except Exception as e:
+                    logger.warning("Could not read file: %s", e)
+            all_alignments[db.name] = []
+            continue
+        
+        logger.info("Starting sequence alignment for %s (%d matches)...", db.name, num_rows)
+        # Save alignment scores to organized directory
+        alignment_scores_path = None
+        if output_path:
+            alignment_scores_dir = output_path / "pyopal_alignments" / bin_name
+            alignment_scores_dir.mkdir(parents=True, exist_ok=True)
+            alignment_scores_path = alignment_scores_dir / f"{db.name}_alignment_scores.tsv"
+        
+        alignments = align_mmseqs_results(
+            best_matches_filepath=db.mmseqs_result,
+            sequence_db=db.sequence_db,
+            alignment_gap_open=alignment_gap_open,
+            alignment_gap_extend=alignment_gap_continuation,
+            threads=threads,
+            output_path=str(alignment_scores_path) if alignment_scores_path else None)
+        logger.info("Completed sequence alignment for %s (%d alignments).", db.name, len(alignments))
+
+        # filter alignments by identity and coverage
+        # Note: thresholds are inclusive (>=), so identity == threshold passes
+        alignments_before_filter = len(alignments)
+        filtered_out_identity = 0
+        filtered_out_coverage = 0
+        filtered_alignments = []
+        for aln in alignments:
+            if aln.query_identity < identity_threshold:
+                filtered_out_identity += 1
+                logger.debug("Filtered out %s vs %s: identity %.3f < threshold %.3f", 
+                            aln.query_name, aln.target_name, aln.query_identity, identity_threshold)
+            elif aln.query_coverage < coverage_threshold:
+                filtered_out_coverage += 1
+                logger.debug("Filtered out %s vs %s: coverage %.3f < threshold %.3f", 
+                            aln.query_name, aln.target_name, aln.query_coverage, coverage_threshold)
+            else:
+                filtered_alignments.append(aln)
+        
+        alignments = filtered_alignments
+        if filtered_out_identity > 0 or filtered_out_coverage > 0:
+            logger.info("Filtered alignments for %s: %d passed, %d failed identity (<%.3f), %d failed coverage (<%.3f)", 
+                       db.name, len(alignments), filtered_out_identity, identity_threshold, 
+                       filtered_out_coverage, coverage_threshold)
+
+        try:
+            for aln in alignments:
+                aln.db_name = db.name
+
+            new_alignments = {
+                aln.query_name: aln
+                for aln in alignments
+                if aln.query_name in query_file.sequences
+            }
+
+            # remove broken structures
+            if db.name == "highquality_clust30":
+                data_path = pathlib.Path(__file__).parent / "assets"
+                data_path = data_path.resolve()
+                with open(data_path / "highquality_clust30_error_ids.pkl", "rb") as f:
+                    error_ids = pickle.load(f)
+                new_alignments = {
+                    query_name: aln
+                    for query_name, aln in new_alignments.items()
+                    if aln.target_name not in error_ids
+                }
+
+            query_ids = [aln.query_name for aln in new_alignments.values()]
+            target_ids = [
+                aln.target_name.rsplit(".", 1)[0]
+                for aln in new_alignments.values()
+            ]
+
+            # extract structural information
+            if save_structures and output_path:
+                structures_dir = output_path / "structures" / bin_name / db.name
+                structures_dir.mkdir(parents=True, exist_ok=True)
+                save_dir = structures_dir
+            else:
+                save_dir = None
+
+            coords = extract_calpha_coords(db,
+                                           target_ids,
+                                           query_ids,
+                                           save_directory=save_dir,
+                                           threads=threads)
+
+            # Log when coordinates extraction fails
+            failed_coord_extractions = []
+            for aln, coord in zip(new_alignments.values(), coords):
+                aln.coords = coord
+                if coord is None:
+                    failed_coord_extractions.append(
+                        (aln.query_name, aln.target_name, aln.query_identity, aln.query_coverage))
+            
+            if failed_coord_extractions:
+                logger.warning(
+                    f"Failed to extract coordinates for {len(failed_coord_extractions)}/{len(new_alignments)} "
+                    f"alignments in database {db.name}:")
+                for qname, tname, ident, cov in failed_coord_extractions[:10]:
+                    logger.warning(
+                        f"  - Query: {qname}, Target: {tname}, Identity: {ident:.3f}, Coverage: {cov:.3f}")
+                if len(failed_coord_extractions) > 10:
+                    logger.warning(f"  ... and {len(failed_coord_extractions) - 10} more")
+
+            all_alignments[db.name] = list(new_alignments.values())
+
+        except IndexError:
+            logger.info("No alignments found for %s.", db.name)
+            all_alignments[db.name] = []
+    
+    return all_alignments
+
+
 def predict_protein_function(
     query_file: QueryFile,
     databases: Tuple[Database],
@@ -169,6 +366,7 @@ def predict_protein_function(
     selection: str = "topbits",                        # or "topbits"
     seed: int = 0,
     drop_self_hits: bool = True,
+    precomputed_alignments: dict = None,  # Optional: reuse alignments from prepare_alignments_for_identity_bin
 ):
 
     # load DeepFRI model
@@ -181,126 +379,62 @@ def predict_protein_function(
         ]
         logger.info("EC number prediction is not supported in version 1.1.")
 
-    if len(deepfri_processing_modes) == 0:
-        raise ValueError("No processing modes selected.")
+    # Allow empty processing modes to skip GO-term prediction
+    skip_prediction = len(deepfri_processing_modes) == 0
+    if skip_prediction:
+        logger.info("No processing modes specified - skipping GO-term prediction. "
+                   "Will still perform alignments and contact map generation.")
 
     weights = pathlib.Path(weights)
     output_path = pathlib.Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
     aligned_cmaps = []
-    for db in databases:
-        if identity_bin or identity_max is not None:
-            filters_dir = (Path(output_path) / "identity_filters" / db.name)
-            filters_dir.mkdir(parents=True, exist_ok=True)
-
-            low, high = (identity_bin if identity_bin else (None, None))
-            filtered_tsv = filter_mmseqs_best_matches(
-                best_matches_path=db.mmseqs_result,
-                ident_low=low, ident_high=high,
-                ident_max=identity_max,
-                min_qcov=coverage_threshold,
-                min_tcov=coverage_threshold,
-                drop_self_hits=drop_self_hits,
-                per_query=selection,
-                seed=seed,
-                out_path=str(filters_dir / Path(db.mmseqs_result).name)
-            )
-            db.mmseqs_result = filtered_tsv  # downstream alignment reads this path
-        # SEQUENCE ALIGNMENT
-        
-        bm = MMseqsResult.from_best_matches(db.mmseqs_result)
-        # Handle empty results - np.genfromtxt may return 0-d array for empty files
-        if bm.result_arr.ndim == 0:
-            # 0-d array (scalar) means empty result
-            num_rows = 0
-        else:
-            num_rows = len(bm.result_arr)
-        logger.info("Filtered best-matches rows for %s: %d", db.name, num_rows)
-
-        logger.info("sequence_db: %s (exists=%s)", db.sequence_db, db.sequence_db.exists())
-        logger.info("foldcomp_db: %s (exists=%s)", db.foldcomp_db, db.foldcomp_db.exists())
-        
-        # calculate already aligned sequences
-        alignments = align_mmseqs_results(
-            best_matches_filepath=db.mmseqs_result,
-            sequence_db=db.sequence_db,
+    
+    # Use precomputed alignments if provided, otherwise compute them
+    if precomputed_alignments is not None:
+        # Reuse precomputed alignments (much faster!)
+        logger.info("Using precomputed alignments (skipping alignment step)")
+        all_alignments = precomputed_alignments
+    else:
+        # Compute alignments (original behavior for backward compatibility)
+        all_alignments = prepare_alignments_for_identity_bin(
+            query_file=query_file,
+            databases=databases,
+            identity_bin=identity_bin,
+            identity_max=identity_max,
             alignment_gap_open=alignment_gap_open,
-            alignment_gap_extend=alignment_gap_continuation,
-            threads=threads)
-
-        # filter alignments by identity and coverage
-        alignments = [
-            aln for aln in alignments
-            if aln.query_identity > identity_threshold
-            and aln.query_coverage > coverage_threshold
-        ]
-
-        try:
-            # set a db name for alignments
-            for aln in alignments:
-                aln.db_name = db.name
-
-            aligned_queries = [aln[0].query_name for aln in aligned_cmaps]
-            new_alignments = {
-                aln.query_name: aln
-                for aln in alignments if aln.query_name not in aligned_queries
-                and aln.query_name in query_file.sequences
-            }
-
-            # CONTACT MAP ALIGNMENT
-            # initially designed as a separate step
-            # some protein structures in PDB are not formatted correctly
-            # so contact map alignment fails for them
-            # for this cases we replace closest experimental structure with
-            # closest predicted structure if available
-            # if no alignments were found - report
-
-            # remove broken structures
-            if db.name == "highquality_clust30":
-                data_path = pathlib.Path(__file__).parent / "assets"
-                # convert to abspath
-                data_path = data_path.resolve()
-                with open(data_path / "highquality_clust30_error_ids.pkl",
-                          "rb") as f:
-                    error_ids = pickle.load(f)
-                # filter out broken structures
-                new_alignments = {
-                    query_name: aln
-                    for query_name, aln in new_alignments.items()
-                    if aln.target_name not in error_ids
-                }
-
-            query_ids = [aln.query_name for aln in new_alignments.values()]
-            target_ids = [
-                aln.target_name.rsplit(".", 1)[0]
-                for aln in new_alignments.values()
-            ]
-
-            # extract structural information
-            # in form of C-alpha coordinates
-            if save_structures:
-                save_dir = output_path / "structures" / db.name
-                save_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                save_dir = None
-
-            coords = extract_calpha_coords(db,
-                                           target_ids,
-                                           query_ids,
-                                           save_directory=save_dir,
-                                           threads=threads)
-
-            for aln, coord in zip(new_alignments.values(), coords):
-                aln.coords = coord
-
-        # troubleshoot cases where alignments are empty
-        except IndexError:
-            logger.info("No alignments found for %s.", db.name)
-            new_alignments = {}
+            alignment_gap_continuation=alignment_gap_continuation,
+            identity_threshold=identity_threshold,
+            coverage_threshold=coverage_threshold,
+            selection=selection,
+            seed=seed,
+            drop_self_hits=drop_self_hits,
+            threads=threads,
+            save_structures=save_structures,
+            output_path=output_path,
+        )
+    
+    # Build contact maps from alignments
+    for db in databases:
+        new_alignments_list = all_alignments.get(db.name, [])
+        if not new_alignments_list:
+            continue
+        
+        # Convert list to dict for consistency with old code
+        new_alignments = {aln.query_name: aln for aln in new_alignments_list}
+        
+        # Remove queries already aligned in previous databases
+        aligned_queries = [aln[0].query_name for aln in aligned_cmaps]
+        new_alignments = {
+            qname: aln for qname, aln in new_alignments.items()
+            if qname not in aligned_queries
+        }
+        
+        if not new_alignments:
             continue
 
-        # if new alignments are empty - result is empty as well
+        # Build contact maps (this is the only part that depends on generate_contacts)
         partial_map_align = partial(build_align_contact_map,
                                     threshold=angstrom_contact_threshold,
                                     generated_contacts=generate_contacts)
@@ -311,6 +445,23 @@ def predict_protein_function(
         # filter errored contact maps
         # returned as Tuple[AlignmentResult, None] from `retrieve_align_contact_map`
         partial_cmaps = [cmap for cmap in cmaps if cmap[1] is not None]
+        failed_cmaps = [cmap for cmap in cmaps if cmap[1] is None]
+        
+        # Log sequences that aligned successfully but failed to produce contact maps
+        if failed_cmaps:
+            logger.warning(
+                f"Contact map generation failed for {len(failed_cmaps)}/{len(cmaps)} successfully aligned sequences "
+                f"in database {db.name} (see warnings above for details).")
+            # Summary statistics
+            failed_with_coords = sum(1 for aln, cmap in failed_cmaps if aln.coords is not None)
+            failed_without_coords = len(failed_cmaps) - failed_with_coords
+            if failed_with_coords > 0:
+                logger.warning(
+                    f"  - {failed_with_coords} failed during contact map alignment (coordinates were available)")
+            if failed_without_coords > 0:
+                logger.warning(
+                    f"  - {failed_without_coords} failed due to missing coordinates")
+        
         aligned_cmaps.extend(partial_cmaps)
         aligned_database = round(
             len(partial_cmaps) / len(query_file.sequences) * 100, 2)
@@ -345,75 +496,80 @@ def predict_protein_function(
     unaligned_queries = dict(
         sorted(unaligned_queries.items(), key=lambda x: len(x[1])))
 
-    output_file_name = output_path / "results.tsv"
-    output_buffer = open(output_file_name, "w", encoding="utf-8")
-    csv_writer = csv.writer(output_buffer, delimiter="\t")
-    csv_writer.writerow(OUTPUT_HEADER)
+    # FUNCTION PREDICTION (skip if processing_modes is empty)
+    if not skip_prediction:
+        output_file_name = output_path / "results.tsv"
+        output_buffer = open(output_file_name, "w", encoding="utf-8")
+        csv_writer = csv.writer(output_buffer, delimiter="\t")
+        csv_writer.writerow(OUTPUT_HEADER)
 
-    for i, mode in enumerate(deepfri_processing_modes):
-        logger.info("Processing mode: %s; %i/%i", DEEPFRI_MODES[mode], i + 1,
-                    len(deepfri_processing_modes))
-        # GCN
-        gcn_prots = len(aligned_cmaps)
-        if gcn_prots > 0:
-            net_type = "gcn"
+        for i, mode in enumerate(deepfri_processing_modes):
+            logger.info("Processing mode: %s; %i/%i", DEEPFRI_MODES[mode], i + 1,
+                        len(deepfri_processing_modes))
+            # GCN
+            gcn_prots = len(aligned_cmaps)
+            if gcn_prots > 0:
+                net_type = "gcn"
 
-            # GCN for queries with aligned contact map
-            gcn_path = deepfri_models_config[net_type][mode]
+                # GCN for queries with aligned contact map
+                gcn_path = deepfri_models_config[net_type][mode]
 
-            gcn = Predictor(gcn_path, threads=threads)
+                gcn = Predictor(gcn_path, threads=threads)
 
-            for i, (aln, aligned_cmap) in tqdm(
-                    enumerate(aligned_cmaps),
-                    total=gcn_prots,
-                    miniters=len(aligned_cmaps) // 10,
-                    desc=f"Predicting with GCN ({DEEPFRI_MODES[mode]})",
-                    bar_format=BAR_FORMAT):
-                # writing the results to the output file
+                for i, (aln, aligned_cmap) in tqdm(
+                        enumerate(aligned_cmaps),
+                        total=gcn_prots,
+                        miniters=len(aligned_cmaps) // 10,
+                        desc=f"Predicting with GCN ({DEEPFRI_MODES[mode]})",
+                        bar_format=BAR_FORMAT):
+                    # writing the results to the output file
 
-                prediction_rows = gcn.predict_function(
-                    seqres=aln.query_sequence,
-                    cmap=aligned_cmap,
-                    chain=str(aln.query_name))
+                    prediction_rows = gcn.predict_function(
+                        seqres=aln.query_sequence,
+                        cmap=aligned_cmap,
+                        chain=str(aln.query_name))
 
-                for row in prediction_rows:
-                    deepfri_info = [net_type, mode]
-                    row.extend(deepfri_info)
+                    for row in prediction_rows:
+                        deepfri_info = [net_type, mode]
+                        row.extend(deepfri_info)
 
-                    # additional alignment info
-                    # corrected name for FoldComp inconsistency
+                        # additional alignment info
+                        # corrected name for FoldComp inconsistency
 
-                    row.extend([
-                        aln.target_name.rsplit(".", 1)[0], aln.db_name,
-                        aln.query_identity, aln.query_coverage
-                    ])
-                    csv_writer.writerow(row)
+                        row.extend([
+                            aln.target_name.rsplit(".", 1)[0], aln.db_name,
+                            aln.query_identity, aln.query_coverage
+                        ])
+                        csv_writer.writerow(row)
 
-            del gcn
+                del gcn
 
-        # CNN for queries without satisfying alignments
-        cnn_prots = len(unaligned_queries)
-        if cnn_prots > 0:
-            net_type = "cnn"
-            cnn_path = deepfri_models_config[net_type][mode]
-            cnn = Predictor(cnn_path, threads=threads)
-            for i, query_id in tqdm(
-                    enumerate(unaligned_queries),
-                    total=cnn_prots,
-                    miniters=len(unaligned_queries) // 10,
-                    desc=f"Predicting with CNN ({DEEPFRI_MODES[mode]})",
-                    bar_format=BAR_FORMAT):
+            # CNN for queries without satisfying alignments
+            cnn_prots = len(unaligned_queries)
+            if cnn_prots > 0:
+                net_type = "cnn"
+                cnn_path = deepfri_models_config[net_type][mode]
+                cnn = Predictor(cnn_path, threads=threads)
+                for i, query_id in tqdm(
+                        enumerate(unaligned_queries),
+                        total=cnn_prots,
+                        miniters=len(unaligned_queries) // 10,
+                        desc=f"Predicting with CNN ({DEEPFRI_MODES[mode]})",
+                        bar_format=BAR_FORMAT):
 
-                prediction_rows = cnn.predict_function(
-                    seqres=unaligned_queries[query_id], chain=str(query_id))
-                for row in prediction_rows:
-                    row.extend([net_type, mode])
-                    row.extend([np.nan, np.nan, np.nan])
-                    csv_writer.writerow(row)
+                    prediction_rows = cnn.predict_function(
+                        seqres=unaligned_queries[query_id], chain=str(query_id))
+                    for row in prediction_rows:
+                        row.extend([net_type, mode])
+                        row.extend([np.nan, np.nan, np.nan])
+                        csv_writer.writerow(row)
 
-            del cnn
+                del cnn
 
-    output_buffer.close()
+        output_buffer.close()
+    else:
+        logger.info("Skipped GO-term prediction (no processing modes specified). "
+                   f"Generated {len(aligned_cmaps)} contact maps and saved them to {output_path / 'contact_maps'}.")
 
     if remove_intermediate:
         for db in databases:

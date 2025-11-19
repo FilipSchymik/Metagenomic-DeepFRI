@@ -64,7 +64,8 @@ class AlignmentResult:
                  query_identity: float = None,
                  query_coverage: float = None,
                  db_name: str = None,
-                 coords: np.ndarray = None):
+                 coords: np.ndarray = None,
+                 alignment_score: float = None):
 
         self.query_name = query_name
         self.query_sequence = query_sequence
@@ -73,6 +74,7 @@ class AlignmentResult:
         self.alignment = alignment
         self.query_identity = query_identity
         self.query_coverage = query_coverage
+        self.alignment_score = alignment_score
         self.insert_gaps()
         self.db_name = db_name
         self.target_coords = None
@@ -139,11 +141,14 @@ def align_pairwise(query, target, gap_open: int = 10, gap_extend: int = 1):
     Args:
         query (str): The query sequence.
         target (str): The target sequence.
-        aligner (pyopal.Aligner): The aligner object.
+        gap_open (int): Gap open penalty.
+        gap_extend (int): Gap extend penalty.
 
     Returns:
         str: The alignment of the query against the target.
         float: The identity of the alignment.
+        float: The coverage of the alignment.
+        float: The alignment score.
 
     """
 
@@ -151,11 +156,13 @@ def align_pairwise(query, target, gap_open: int = 10, gap_extend: int = 1):
     database = pyopal.Database([target])
     # Align the sequences
     alignment = aligner.align(query, database, algorithm="nw", mode="full")
-    alignment_string = alignment[0].alignment
-    identity = alignment[0].identity()
-    coverage = alignment[0].coverage(reference="query")
+    alignment_result = alignment[0]
+    alignment_string = alignment_result.alignment
+    identity = alignment_result.identity()
+    coverage = alignment_result.coverage(reference="query")
+    score = alignment_result.score
 
-    return alignment_string, identity, coverage
+    return alignment_string, identity, coverage, score
 
 
 def pairwise_against_database(query_id,
@@ -171,12 +178,12 @@ def pairwise_against_database(query_id,
     best_idx, best_target = best_hit_database(query_sequence, target_sequences,
                                               gap_open, gap_extend)
     # align the query against the best hit
-    alignment, identity, coverage = align_pairwise(query_sequence, best_target,
-                                                   gap_open, gap_extend)
+    alignment, identity, coverage, score = align_pairwise(query_sequence, best_target,
+                                                          gap_open, gap_extend)
     # create an alignment object
     alignment_result = AlignmentResult(query_id, query_sequence, best_idx,
                                        best_target, alignment, identity,
-                                       coverage)
+                                       coverage, alignment_score=score)
 
     return alignment_result
 
@@ -198,36 +205,73 @@ def align_mmseqs_results(best_matches_filepath: str,
                          sequence_db: str,
                          alignment_gap_open: int = 10,
                          alignment_gap_extend: int = 1,
-                         threads: int = 1):
+                         threads: int = 1,
+                         output_path: str = None):
+    import logging
+    import csv
+    from pathlib import Path
+    logger = logging.getLogger(__name__)
 
     best_matches = MMseqsResult.from_best_matches(best_matches_filepath)
     # check if there are any best matches
     if best_matches.size == 0:
         return []
 
+    logger.info("Loading query sequences from %s...", best_matches.query_fasta)
     query_dict = load_fasta_as_dict(best_matches.query_fasta)
+    logger.info("Loaded %d query sequences.", len(query_dict))
+    
+    logger.info("Extracting unique queries and targets...")
     unique_queries = {
         query: best_matches.get_query_targets(query)
         for query in best_matches.get_queries()
     }
     target_ids = best_matches.get_targets()
+    logger.info("Found %d unique queries and %d target IDs.", len(unique_queries), len(target_ids))
+    
+    logger.info("Loading target sequences from %s (this may take a while for large databases)...", sequence_db)
     target_seqs = retrieve_fasta_entries_as_dict(sequence_db, target_ids)
+    logger.info("Loaded %d target sequences.", len(target_seqs))
 
     # create partial databases
+    logger.info("Creating partial databases for %d queries...", len(unique_queries))
     partial_databases = {
         k: create_partial_database(v, target_seqs)
         for k, v in unique_queries.items()
     }
+    logger.info("Created partial databases.")
 
     align_partial = partial(pairwise_against_database,
                             gap_open=alignment_gap_open,
                             gap_extend=alignment_gap_extend)
 
     # align the query against the best hit
+    logger.info("Starting pairwise alignment with %d threads for %d queries...", threads, len(unique_queries))
     with Pool(threads) as pool:
         alignments = pool.starmap(
             align_partial,
             [(query_id, query_dict[query_id], partial_databases[query_id])
              for query_id in unique_queries])
+    logger.info("Completed pairwise alignment, generated %d alignments.", len(alignments))
+
+    # Save alignment scores to file if output_path is provided
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving alignment scores to %s", output_path)
+        with open(output_path, 'w', newline='') as f:
+            writer = csv.writer(f, delimiter='\t')
+            writer.writerow(['query_name', 'target_name', 'alignment_score', 'identity', 'coverage', 'query_length', 'target_length'])
+            for aln in alignments:
+                writer.writerow([
+                    aln.query_name,
+                    aln.target_name,
+                    aln.alignment_score if aln.alignment_score is not None else '',
+                    aln.query_identity if aln.query_identity is not None else '',
+                    aln.query_coverage if aln.query_coverage is not None else '',
+                    len(aln.query_sequence) if aln.query_sequence else '',
+                    len(aln.target_sequence) if aln.target_sequence else ''
+                ])
+        logger.info("Saved alignment scores for %d alignments", len(alignments))
 
     return alignments

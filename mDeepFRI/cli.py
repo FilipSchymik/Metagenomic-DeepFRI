@@ -12,7 +12,7 @@ from click.exceptions import UsageError
 from click.utils import echo
 
 from mDeepFRI.pipeline import (hierarchical_database_search, load_query_file,
-                               predict_protein_function)
+                               predict_protein_function, prepare_alignments_for_identity_bin)
 from mDeepFRI.utils import download_model_weights, generate_config_json
 from mDeepFRI.bio_utils import load_structure, get_residues_coordinates, calculate_contact_map
 from mDeepFRI.database import Database
@@ -354,6 +354,8 @@ def search_databases(input, output, db_path, sensitivity, min_length,
 @click.option("--seed", default=0, type=int, help="Random seed if per-query=random.")
 @click.option("--precomputed-tsv", type=click.Path(exists=True),
               help="Use a precomputed MMseqs2 best-match TSV instead of running a new search.")
+@click.option("--skip-prediction", default=False, is_flag=True,
+              help="Skip GO-term prediction. Will still perform alignments and contact map generation.")
 
 def predict_function(input, db_path, weights, output, processing_modes,
                      angstrom_contact_thresh, generate_contacts,
@@ -364,7 +366,8 @@ def predict_function(input, db_path, weights, output, processing_modes,
                      cmap_coverage, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length,
                      save_structures, save_cmaps, identity_bin, 
-                     identity_max, per_query, drop_self_hits, seed, precomputed_tsv):
+                     identity_max, per_query, drop_self_hits, seed, precomputed_tsv,
+                     skip_prediction):
     """Predict protein function from sequence."""
     logger.info("Starting Metagenomic-DeepFRI.")
 
@@ -376,7 +379,11 @@ def predict_function(input, db_path, weights, output, processing_modes,
     logger.info("Database:                      %s", db_path)
     logger.info("Weights:                       %s", weights)
     logger.info("Output:                        %s", output)
-    logger.info("Processing modes:              %s", processing_modes)
+    # Clear processing_modes if skip_prediction is True
+    if skip_prediction:
+        processing_modes = ()
+        logger.info("Skipping GO-term prediction (--skip-prediction flag set)")
+    logger.info("Processing modes:              %s", processing_modes if processing_modes else "None (prediction skipped)")
     logger.info("Angstrom contact threshold:    %s", angstrom_contact_thresh)
     logger.info("Generate contacts:             %s", generate_contacts)
     logger.info("MMSeqs2 sensitivity:           %s", sensitivity)
@@ -451,7 +458,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
     else:
         deepfri_dbs = hierarchical_database_search(
             query_file=query_file,
-            output_path=output_path / "database_search",
+            output_path=output_path / "mmseqs2_search",
             databases=db_path,
             sensitivity=sensitivity,
             min_bits=min_bitscore,
@@ -467,35 +474,72 @@ def predict_function(input, db_path, weights, output, processing_modes,
     # Preserve original database result paths (they get modified in predict_protein_function)
     original_db_paths = {db.name: db.mmseqs_result for db in deepfri_dbs}
     
-    # Iterate over all combinations of identity_bin and generate_contacts
+    # Optimize: Group by identity_bin first, then iterate over generate_contacts
+    # This way we only align once per identity_bin, not for each generate_contacts value
     total_combinations = len(identity_bins) * len(generate_contacts_list)
     logger.info("Running %d hyperparameter combinations", total_combinations)
+    logger.info("Optimization: Alignments will be computed once per identity_bin and reused for all generate_contacts values")
     
-    combinations = list(itertools.product(identity_bins, generate_contacts_list))
-    for idx, (ib, gen_contacts) in enumerate(combinations, 1):
-        # Restore original database result paths for each combination
+    combination_idx = 0
+    for ib in identity_bins:
+        # Restore original database result paths for this identity bin
         for db in deepfri_dbs:
             db.mmseqs_result = original_db_paths[db.name]
-        # Create output path suffix for this combination
+        
+        # Prepare alignments once for this identity bin (expensive step)
+        logger.info("=" * 80)
+        logger.info("Preparing alignments for identity_bin=%s", ib)
+        logger.info("=" * 80)
+        
+        # Create organized output paths for this identity bin
         if ib is not None:
-            suffix = f"_id{ib[0]:.2f}-{ib[1]:.2f}_gc{gen_contacts}"
+            bin_name = f"identity_bin_{ib[0]:.2f}-{ib[1]:.2f}"
         else:
-            suffix = f"_gc{gen_contacts}"
+            bin_name = "identity_bin_all"
         
-        combo_output_path = output_path / f"results{suffix}"
-        combo_output_path.mkdir(parents=True, exist_ok=True)
-        
-        logger.info("=" * 80)
-        logger.info("Combination %d/%d: identity_bin=%s, generate_contacts=%d", 
-                   idx, total_combinations, ib, gen_contacts)
-        logger.info("Output path: %s", combo_output_path)
-        logger.info("=" * 80)
-        
-        # Only remove intermediate files after the last combination
-        remove_intermediate_this_iter = remove_intermediate and (idx == total_combinations)
-        
-        predict_protein_function(
+        precomputed_alignments = prepare_alignments_for_identity_bin(
             query_file=query_file,
+            databases=deepfri_dbs,
+            identity_bin=ib,
+            identity_max=identity_max,
+            alignment_gap_open=alignment_gap_open,
+            alignment_gap_continuation=alignment_gap_extend,
+            identity_threshold=cmap_identity,
+            coverage_threshold=cmap_coverage,
+            selection=per_query,
+            seed=seed,
+            drop_self_hits=drop_self_hits,
+            threads=threads,
+            save_structures=save_structures,
+            output_path=str(output_path),  # Pass main output_path for organized structure
+        )
+        
+        # Now iterate over generate_contacts values, reusing the same alignments
+        for gen_contacts in generate_contacts_list:
+            combination_idx += 1
+            idx = combination_idx  # For backward compatibility with existing code
+            
+            # Create organized output path for final results
+            if ib is not None:
+                bin_name = f"identity_bin_{ib[0]:.2f}-{ib[1]:.2f}"
+            else:
+                bin_name = "identity_bin_all"
+            
+            combo_output_path = output_path / "results" / bin_name / f"generate_contacts_{gen_contacts}"
+            combo_output_path.mkdir(parents=True, exist_ok=True)
+            
+            logger.info("=" * 80)
+            logger.info("Combination %d/%d: identity_bin=%s, generate_contacts=%d", 
+                       idx, total_combinations, ib, gen_contacts)
+            logger.info("Output path: %s", combo_output_path)
+            logger.info("(Reusing alignments from identity_bin preparation)")
+            logger.info("=" * 80)
+        
+            # Only remove intermediate files after the last combination
+            remove_intermediate_this_iter = remove_intermediate and (idx == total_combinations)
+            
+            predict_protein_function(
+                query_file=query_file,
             databases=deepfri_dbs,
             weights=weights,
             output_path=combo_output_path,
@@ -514,7 +558,8 @@ def predict_function(input, db_path, weights, output, processing_modes,
             threads=threads,
             remove_intermediate=remove_intermediate_this_iter,
             save_structures=save_structures,
-            save_cmaps=save_cmaps)
+                save_cmaps=save_cmaps,
+                precomputed_alignments=precomputed_alignments)  # Reuse alignments!
 
 
 @main.command()

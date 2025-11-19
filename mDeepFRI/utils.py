@@ -266,35 +266,46 @@ def retrieve_fasta_entries_as_dict(fasta_file: str,
     Returns:
         Dict[str, str]: Dictionary of FASTA entries.
     """
-
+    import logging
+    logger = logging.getLogger(__name__)
+    
     fasta_dict = dict()
     # silence pysam warnings for duplicate sequences
     verb = pysam.set_verbosity(0)
 
+    logger.info("Opening FASTA file: %s (this may take a while for large compressed files)...", fasta_file)
     try:
         fasta_handle = FastaFile(fasta_file)
+        logger.info("FASTA file opened successfully (already indexed).")
 
     # catch gzipped files and recompress with bgzip
     except OSError:
+        logger.info("FASTA file is gzipped, decompressing and indexing (this may take several minutes for large files)...")
         # unzip file
         with gzip.open(fasta_file, "rt") as f:
             content = f.read()
+        logger.info("Decompressed FASTA file, writing and compressing with bgzip...")
         # write to new file
         new_filepath = Path(fasta_file).parent / Path(fasta_file).stem
         with open(new_filepath, "w") as f:
             f.write(content)
             new_archive = str(new_filepath) + ".gz"
             tabix_compress(new_filepath, new_archive, force=True)
+        logger.info("FASTA file indexed, opening...")
         fasta_handle = FastaFile(new_archive)
 
+    logger.info("Fetching %d sequences from FASTA file...", len(entries))
     with fasta_handle:
-        for seq_id in entries:
+        for i, seq_id in enumerate(entries):
+            if (i + 1) % 1000 == 0:
+                logger.info("Loaded %d/%d sequences (%.1f%%)...", i + 1, len(entries), 100 * (i + 1) / len(entries))
             try:
                 fasta_dict[seq_id] = fasta_handle.fetch(seq_id)
             except KeyError:
                 raise ValueError(
                     f"Sequence with ID {seq_id} not found in {fasta_file}")
 
+    logger.info("Successfully loaded %d sequences.", len(fasta_dict))
     # reset verbosity
     pysam.set_verbosity(verb)
 

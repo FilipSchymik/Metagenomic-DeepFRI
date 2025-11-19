@@ -350,14 +350,24 @@ def build_align_contact_map(
                                              alignment.gapped_target, cmap,
                                              generated_contacts)
         except IndexError:
-            pdb_id, chain = idx.upper().split("_")
+            # Try to extract PDB ID and chain, but handle cases where format is different
+            try:
+                pdb_id, chain = idx.upper().split("_")
+                target_info = f"PDB ID {pdb_id}[Chain {chain}]"
+            except ValueError:
+                target_info = f"target {idx}"
             logger.warning(
-                f"Error aligning contact map for PDB ID {pdb_id}[Chain {chain}] "
-                f"against {alignment.query_name}.")
+                f"Contact map alignment failed: {target_info} against query {alignment.query_name} "
+                f"(identity={alignment.query_identity:.3f}, coverage={alignment.query_coverage:.3f}). "
+                f"IndexError during contact map alignment - likely alignment length mismatch.")
             aligned_cmap = None
 
     else:
-        logger.warning(f"No coordinates found for {alignment.target_name}.")
+        logger.warning(
+            f"Contact map generation failed: No coordinates found for target {alignment.target_name} "
+            f"against query {alignment.query_name} "
+            f"(identity={alignment.query_identity:.3f}, coverage={alignment.query_coverage:.3f}). "
+            f"Structure extraction may have failed.")
         aligned_cmap = None
 
     return (alignment, aligned_cmap)
