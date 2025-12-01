@@ -206,7 +206,9 @@ def align_mmseqs_results(best_matches_filepath: str,
                          alignment_gap_open: int = 10,
                          alignment_gap_extend: int = 1,
                          threads: int = 1,
-                         output_path: str = None):
+                         output_path: str = None,
+                         save_raw_alignments: bool = False,
+                         raw_alignments_path: str = None):
     import logging
     import csv
     from pathlib import Path
@@ -273,5 +275,33 @@ def align_mmseqs_results(best_matches_filepath: str,
                     len(aln.target_sequence) if aln.target_sequence else ''
                 ])
         logger.info("Saved alignment scores for %d alignments", len(alignments))
+
+    # Save raw alignments (gapped sequences) to FASTA file if requested
+    if save_raw_alignments and raw_alignments_path is not None:
+        raw_alignments_path = Path(raw_alignments_path)
+        raw_alignments_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving raw alignments to %s", raw_alignments_path)
+        
+        with open(raw_alignments_path, 'w') as f:
+            for aln in alignments:
+                # Write query sequence with gaps
+                header_query = f">{aln.query_name}|target={aln.target_name}|identity={aln.query_identity:.4f}|coverage={aln.query_coverage:.4f}|score={aln.alignment_score if aln.alignment_score is not None else 'N/A'}"
+                f.write(header_query + "\n")
+                # Write sequence in chunks of 80 characters (standard FASTA format)
+                gapped_query = aln.gapped_sequence if hasattr(aln, 'gapped_sequence') and aln.gapped_sequence else aln.query_sequence
+                for i in range(0, len(gapped_query), 80):
+                    f.write(gapped_query[i:i+80] + "\n")
+                
+                # Write target sequence with gaps
+                header_target = f">{aln.target_name}|query={aln.query_name}|identity={aln.query_identity:.4f}|coverage={aln.query_coverage:.4f}|score={aln.alignment_score if aln.alignment_score is not None else 'N/A'}"
+                f.write(header_target + "\n")
+                gapped_target = aln.gapped_target if hasattr(aln, 'gapped_target') and aln.gapped_target else aln.target_sequence
+                for i in range(0, len(gapped_target), 80):
+                    f.write(gapped_target[i:i+80] + "\n")
+                
+                # Write alignment string (optional, for reference)
+                f.write(f"#alignment_string: {aln.alignment}\n")
+        
+        logger.info("Saved raw alignments for %d alignments", len(alignments))
 
     return alignments

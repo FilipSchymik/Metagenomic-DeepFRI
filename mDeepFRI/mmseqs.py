@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from functools import partial
@@ -673,6 +674,32 @@ def extract_fasta_foldcomp(foldcomp_db: str,
     return Path(str(output_file) + ".gz")
 
 
+def _normalize_identifier(identifier: str) -> str:
+    """
+    Normalize an identifier by removing model version suffixes.
+    
+    Examples:
+        AF-A0A089QRB9-F1-model_v6 -> AF-A0A089QRB9-F1
+        AF-A0A089QRB9-F1-model_v4 -> AF-A0A089QRB9-F1
+        AF-A0A089QRB9-F1 -> AF-A0A089QRB9-F1
+        A0A089QRB9 -> A0A089QRB9
+    
+    Parameters
+    ----------
+    identifier : str
+        The identifier to normalize
+        
+    Returns
+    -------
+    str
+        The normalized identifier without model version suffix
+    """
+    # Remove model version suffix (e.g., -model_v6, -model_v4)
+    # Match pattern: -model_v followed by digits at the end
+    normalized = re.sub(r'-model_v\d+$', '', str(identifier))
+    return normalized
+
+
 def filter_mmseqs_best_matches(
     best_matches_path: str,
     *,
@@ -718,9 +745,16 @@ def filter_mmseqs_best_matches(
     # This ensures we only randomly select from valid (non-self) hits
     num_before_self_filter = np.sum(mask)
     if drop_self_hits:
-        # Check for exact matches or target starts with f"AF-{query}-"
+        # Check for exact matches, target starts with f"AF-{query}-", or normalized identifiers match
+        # Normalization removes model version suffixes (e.g., -model_v6, -model_v4) to catch
+        # self-hits across different model versions
         af_self = np.fromiter(
-            (str(q) == str(t) or str(t).startswith(f"AF-{str(q)}-") for q,t in zip(R["query"], R["target"])),
+            (
+                str(q) == str(t) 
+                or str(t).startswith(f"AF-{str(q)}-")
+                or _normalize_identifier(str(q)) == _normalize_identifier(str(t))
+                for q, t in zip(R["query"], R["target"])
+            ),
             dtype=bool, count=len(R)
         )
         num_self_hits = np.sum(mask & af_self)

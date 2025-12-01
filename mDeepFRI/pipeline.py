@@ -163,6 +163,7 @@ def prepare_alignments_for_identity_bin(
     threads: int = 1,
     save_structures: bool = False,
     output_path: str = None,
+    save_raw_alignments: bool = False,
 ):
     """
     Prepare alignments and coordinates for a given identity bin.
@@ -238,10 +239,13 @@ def prepare_alignments_for_identity_bin(
         logger.info("Starting sequence alignment for %s (%d matches)...", db.name, num_rows)
         # Save alignment scores to organized directory
         alignment_scores_path = None
+        raw_alignments_path = None
         if output_path:
             alignment_scores_dir = output_path / "pyopal_alignments" / bin_name
             alignment_scores_dir.mkdir(parents=True, exist_ok=True)
             alignment_scores_path = alignment_scores_dir / f"{db.name}_alignment_scores.tsv"
+            if save_raw_alignments:
+                raw_alignments_path = alignment_scores_dir / f"{db.name}_raw_alignments.fasta"
         
         alignments = align_mmseqs_results(
             best_matches_filepath=db.mmseqs_result,
@@ -249,7 +253,9 @@ def prepare_alignments_for_identity_bin(
             alignment_gap_open=alignment_gap_open,
             alignment_gap_extend=alignment_gap_continuation,
             threads=threads,
-            output_path=str(alignment_scores_path) if alignment_scores_path else None)
+            output_path=str(alignment_scores_path) if alignment_scores_path else None,
+            save_raw_alignments=save_raw_alignments,
+            raw_alignments_path=str(raw_alignments_path) if raw_alignments_path else None)
         logger.info("Completed sequence alignment for %s (%d alignments).", db.name, len(alignments))
 
         # filter alignments by identity and coverage
@@ -367,6 +373,7 @@ def predict_protein_function(
     seed: int = 0,
     drop_self_hits: bool = True,
     precomputed_alignments: dict = None,  # Optional: reuse alignments from prepare_alignments_for_identity_bin
+    save_raw_alignments: bool = False,
 ):
 
     # load DeepFRI model
@@ -413,6 +420,7 @@ def predict_protein_function(
             threads=threads,
             save_structures=save_structures,
             output_path=output_path,
+            save_raw_alignments=save_raw_alignments,
         )
     
     # Build contact maps from alignments

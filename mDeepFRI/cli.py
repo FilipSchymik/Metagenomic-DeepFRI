@@ -344,6 +344,13 @@ def search_databases(input, output, db_path, sensitivity, min_length,
     is_flag=True,
     help="Save contact maps of the top hits.",
 )
+@click.option(
+    "--save-raw-alignments",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Save raw alignments (gapped sequences) from pyopal to FASTA files.",
+)
 @click.option("--identity-bin", default=None, multiple=True, type=str,
               help="Identity bin as 'low,high' (e.g. '0.80,0.90'). Can be specified multiple times (e.g., --identity-bin 0.9,1.0 --identity-bin 0.8,0.9).")
 @click.option("--identity-max", default=None, type=float,
@@ -365,7 +372,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
                      alignment_gap_extend, cmap_identity, tmpdir,
                      cmap_coverage, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length,
-                     save_structures, save_cmaps, identity_bin, 
+                     save_structures, save_cmaps, save_raw_alignments, identity_bin, 
                      identity_max, per_query, drop_self_hits, seed, precomputed_tsv,
                      skip_prediction):
     """Predict protein function from sequence."""
@@ -395,6 +402,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
     logger.info("Alignment gap extend:          %s", alignment_gap_extend)
     logger.info("Alignment minimum identity:    %s", cmap_identity)
     logger.info("Alignment minimum coverage:    %s", cmap_coverage)
+    logger.info("Save raw alignments:           %s", save_raw_alignments)
     logger.info("Remove intermediate:           %s", remove_intermediate)
     logger.info("Overwrite:                     %s", overwrite)
     logger.info("Threads:                       %s", threads)
@@ -512,6 +520,7 @@ def predict_function(input, db_path, weights, output, processing_modes,
             threads=threads,
             save_structures=save_structures,
             output_path=str(output_path),  # Pass main output_path for organized structure
+            save_raw_alignments=save_raw_alignments,
         )
         
         # Now iterate over generate_contacts values, reusing the same alignments
