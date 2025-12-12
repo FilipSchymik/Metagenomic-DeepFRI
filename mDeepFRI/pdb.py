@@ -1,4 +1,5 @@
 import gzip
+import logging
 import warnings
 from functools import partial
 from multiprocessing import Pool
@@ -18,6 +19,8 @@ from mDeepFRI.mmseqs import _createdb, _createindex
 from mDeepFRI.utils import download_file, stdout_warn
 
 warnings.showwarning = stdout_warn
+
+logger = logging.getLogger(__name__)
 
 
 def create_pdb_mmseqs(threads: int = 1):
@@ -75,20 +78,51 @@ def get_pdb_structure(pdb_id: str, save_directory: str = None) -> str:
 
     Args:
         pdb_id (str): PDB ID.
+        save_directory (Path, optional): Directory to save the structure file.
 
     Returns:
         str: PDB structure in mmCIF format as a string.
+        
+    Raises:
+        requests.RequestException: If the HTTP request fails.
+        ValueError: If the response is empty or invalid.
 
     """
-
     pdb_http = "https://files.rcsb.org/view/{pdb_id}.cif"
-    pdb_id = pdb_id.lower()
-    url = pdb_http.format(pdb_id=pdb_id)
-    structure = requests.get(url).text
-    if save_directory:
-        with open(save_directory / f"{pdb_id}.cif", "w") as f:
-            f.write(structure)
-    return structure
+    pdb_id_lower = pdb_id.lower()
+    url = pdb_http.format(pdb_id=pdb_id_lower)
+    
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
+        
+        structure = response.text
+        
+        # Validate that we got actual mmCIF data, not an error page
+        if not structure or len(structure.strip()) == 0:
+            raise ValueError(f"Empty response from RCSB PDB for {pdb_id.upper()}")
+        
+        # Check for common error indicators in the response
+        if structure.strip().startswith("<!DOCTYPE") or "<html" in structure.lower():
+            raise ValueError(f"Received HTML error page instead of mmCIF file for {pdb_id.upper()}")
+        
+        # Basic validation: mmCIF files should contain data_ blocks
+        if "data_" not in structure[:1000]:  # Check first 1000 chars
+            raise ValueError(f"Response does not appear to be a valid mmCIF file for {pdb_id.upper()}")
+        
+        if save_directory:
+            save_directory.mkdir(parents=True, exist_ok=True)
+            with open(save_directory / f"{pdb_id_lower}.cif", "w") as f:
+                f.write(structure)
+        
+        return structure
+        
+    except requests.Timeout:
+        raise requests.RequestException(f"Timeout while downloading PDB structure {pdb_id.upper()} from RCSB PDB")
+    except requests.HTTPError as e:
+        raise requests.RequestException(f"HTTP error {e.response.status_code} while downloading PDB structure {pdb_id.upper()}: {e}")
+    except requests.RequestException as e:
+        raise requests.RequestException(f"Network error while downloading PDB structure {pdb_id.upper()}: {e}")
 
 
 # TODO: pdbfixer should remove error catching in this function
@@ -102,23 +136,51 @@ def get_pdb_seq_coords(pdb_id_chain: str,
     Args:
         pdb_id_chain (str): PDB ID and chain identifier separated by an underscore.
         query_name (str): Name of the query sequence. Not essential, used for logging.
+        save_directory (Path, optional): Directory to save the structure file.
 
     Returns:
         Tuple[str, np.ndarray]: A tuple containing a sequence and coordinates of a protein chain.
+        Returns (None, None) if extraction fails, allowing the pipeline to try other databases.
     """
     pdb_id, chain = pdb_id_chain.split("_")
-    structure = get_pdb_structure(pdb_id, save_directory=save_directory)
+    pdb_id_upper = pdb_id.upper()
+    
+    try:
+        structure = get_pdb_structure(pdb_id, save_directory=save_directory)
+    except (requests.RequestException, ValueError) as e:
+        # Log the error but don't crash - allow pipeline to try other databases
+        logger.warning(
+            f"Failed to download PDB structure {pdb_id_upper}[Chain {chain}] for query {query_name}: {e}. "
+            f"Will attempt to find structure in other databases."
+        )
+        return None, None
 
     try:
         sequence, coords = extract_residues_coordinates(structure,
                                                         chain=chain,
                                                         filetype="mmcif")
     except KeyError as e:
+        # Non-standard residue present
         sequence, coords = None, None
-        pdb_id = pdb_id.upper()
-        warnings.warn(
-            f"Error extracting residues and coordinates for PDB ID {pdb_id}[Chain {chain}] - "
-            f"non-standard residue {str(e)} present; {query_name} alignment skipped."
+        logger.warning(
+            f"Error extracting residues and coordinates for PDB ID {pdb_id_upper}[Chain {chain}] "
+            f"for query {query_name} - non-standard residue {str(e)} present. "
+            f"Will attempt to find structure in other databases."
+        )
+    except ValueError as e:
+        # Error parsing mmCIF file (e.g., "There are no blocks in the file")
+        sequence, coords = None, None
+        logger.warning(
+            f"Error parsing mmCIF file for PDB ID {pdb_id_upper}[Chain {chain}] "
+            f"for query {query_name}: {e}. Will attempt to find structure in other databases."
+        )
+    except Exception as e:
+        # Catch any other unexpected errors
+        sequence, coords = None, None
+        logger.warning(
+            f"Unexpected error extracting coordinates for PDB ID {pdb_id_upper}[Chain {chain}] "
+            f"for query {query_name}: {type(e).__name__}: {e}. "
+            f"Will attempt to find structure in other databases."
         )
 
     return sequence, coords
