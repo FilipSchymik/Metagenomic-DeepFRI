@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
-from typing import Annotated, Dict, Iterable, List, Literal
+from typing import Annotated, Dict, Iterable, List, Literal, Optional
 
 import numpy as np
 import numpy.lib.recfunctions as rfn
@@ -238,24 +238,28 @@ class MMseqsResult(np.recarray):
         return self.apply_mask(mask)
 
     def find_best_matches(self,
-                          k: int = 5,
+                          k: Optional[int] = 5,
                           threads: int = 1) -> "MMseqsResult":
         """
         Selects k best matches for each query sequence based on bit score and identity.
 
         Args:
-            k (int): Number of best matches to select.
+            k (Optional[int]): Number of best matches to select. If None or 0, returns all matches.
             threads (int): Number of threads to use.
 
         Returns:
             MMseqsResult: MMseqs2 search results with best matches.
         """
-        def select_top_k(query, db, k=30):
-            return db[db["query"] == query][:k]
-
         # sort by bit score
         self.result_arr.sort(order=["query", "bits", "fident"],
                              kind="quicksort")
+        
+        # If k is None or 0, return all matches (no filtering)
+        if k is None or k == 0:
+            return MMseqsResult(self.result_arr[::-1], self.query_fasta, self.database)
+        
+        def select_top_k(query, db, k=30):
+            return db[db["query"] == query][:k]
 
         select_top = partial(select_top_k, db=self.result_arr[::-1], k=k)
         # select k best hits

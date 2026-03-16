@@ -12,15 +12,13 @@
 # -----------------------------------------------------------------------------
 
 # Input FASTA file
-#INPUT_FILE="input_sequences/sample.fasta"
-INPUT_FILE="input_sequences/landscape_afdb_50k.fasta"
+INPUT_FILE="/home/FilipS/software/mdeepfri_source/Metagenomic-DeepFRI/input_sequences/uhgp_10_mags.fasta"
 
 # Path to model weights folder
 WEIGHTS_PATH="weights_folder/"
 
 # Output directory
-OUTPUT_DIR="results/landscape_afdb_50k"
-#OUTPUT_DIR="results/test_no_go_terms/"
+OUTPUT_DIR="results/uhgp_10_mags/"
 
 # Timing log file (will be created in OUTPUT_DIR)
 TIMING_LOG="${OUTPUT_DIR}/timing.log"
@@ -34,29 +32,36 @@ SAVE_TERMINAL_OUTPUT=true
 # Database paths (can specify multiple databases)
 # Example: DATABASES=("database1" "database2")
 # Leave empty to use only PDB100: DATABASES=()
-DATABASES=("/mnt/storage_10T/afdb_foldcomp/afdb_uniprot_v4")
-#DATABASES=("/home/FilipS/software/Metagenomic-DeepFRI/afdb/afdb_rep_v4")
+# Note: PDB100 is searched by default, then these databases are searched
+DATABASES=("/mnt/storage_10T/afdb_foldcomp/afdb_uniprot_v4" "/home/FilipS/software/Metagenomic-DeepFRI/esm_clust30/highquality_clust30")
 
-# Number of top MMSeqs2 hits to save
-TOP_K=100
+# Number of top MMSeqs2 hits to save per query
+# Then PER_QUERY (defaults to "topbits") selects the best hit from these
+# Recommended: Set to 100-200 to ensure you get the best hit
+# If not set, defaults to 1 (which means only 1 hit per query)
+TOP_K=3
 
 # Identity bins (format: "low,high")
+# These are used for organizing results, not for filtering MMSeqs2 hits
+# If you want to filter only with pyopal (cmap-identity/cmap-coverage), use a single bin covering all identities
 # Example: IDENTITY_BINS=("0.9,1.0" "0.8,0.9" "0.7,0.8" "0.6,0.7")
-IDENTITY_BINS=("0.90,1.00" "0.80,0.90" "0.70,0.80" "0.60,0.70" "0.50,0.60" "0.40,0.50" "0.30,0.40")
-#IDENTITY_BINS=("0.90,1.00" "0.80,0.90" "0.70,0.80")
+# NOTE: Upper bound is EXCLUSIVE (<), so use 1.01 to include perfect 1.0 identity hits
+# For no identity-based filtering, use a single bin covering all (including 1.0):
+IDENTITY_BINS=("0.00,1.01")
 
 # Generate contacts values
 # Example: GENERATE_CONTACTS=(0 1 2 3 4)
-GENERATE_CONTACTS=(0 1 2 3 4)
+GENERATE_CONTACTS=(2)
 
 # Processing modes (bp, cc, ec, mf)
-PROCESSING_MODES=()
+PROCESSING_MODES=("bp" "cc" "mf")
 
 # Additional options
-SAVE_CMAPS=true
-SAVE_STRUCTURES=true
-THREADS=14
-SKIP_PDB=true
+SAVE_CMAPS=false
+SAVE_STRUCTURES=false
+SAVE_RAW_ALIGNMENTS=false  # Set to true to save raw alignments (gapped sequences) from pyopal
+THREADS=15
+SKIP_PDB=false
 
 # -----------------------------------------------------------------------------
 # ADVANCED OPTIONS (optional - uncomment and modify if needed)
@@ -66,20 +71,23 @@ SKIP_PDB=true
 # SENSITIVITY=5.7
 # MIN_BITSCORE=0
 # MAX_EVAL=0.001
+# Set MIN_IDENTITY=0.0 to not filter MMSeqs2 hits by identity (filtering happens later with pyopal)
 MIN_IDENTITY=0.0
 # MIN_COVERAGE=0.9
 
-# Contact map alignment parameters
+# Contact map alignment parameters (used for pyopal filtering)
 # ANGSTROM_CONTACT_THRESH=6
 # ALIGNMENT_GAP_OPEN=10
 # ALIGNMENT_GAP_EXTEND=1
-CMAP_IDENTITY=0.0
-CMAP_COVERAGE=0.0
+# These filter alignments after pyopal alignment (not MMSeqs2 hits)
+CMAP_IDENTITY=0.3
+CMAP_COVERAGE=0.9
 
 # Other options
-PER_QUERY="random"  # or "topbits"
-DROP_SELF_HITS=true
-SEED=42  # Random seed (important when PER_QUERY="random" for reproducibility)
+# PER_QUERY defaults to "topbits" (best hit by bitscore) - this is what you want
+# PER_QUERY="random"  # or "topbits" - uncomment to change from default
+DROP_SELF_HITS=false
+# SEED=42  # Random seed (important when PER_QUERY="random" for reproducibility)
 # REMOVE_INTERMEDIATE=false
 
 # =============================================================================
@@ -165,6 +173,7 @@ log_timing "Generate contacts:  ${GENERATE_CONTACTS[@]}"
 log_timing "Processing modes:   ${PROCESSING_MODES[@]}"
 log_timing "Threads:            $THREADS"
 log_timing "Skip PDB:           $SKIP_PDB"
+log_timing "Save raw alignments: $SAVE_RAW_ALIGNMENTS"
 log_timing "Per query:          $PER_QUERY"
 log_timing "Drop self hits:     $DROP_SELF_HITS"
 log_timing "Seed:               ${SEED:-0}"
@@ -183,6 +192,7 @@ echo_and_log "Identity bins:     ${IDENTITY_BINS[@]}"
 echo_and_log "Generate contacts: ${GENERATE_CONTACTS[@]}"
 echo_and_log "Processing modes:  ${PROCESSING_MODES[@]}"
 echo_and_log "Threads:           $THREADS"
+echo_and_log "Save raw alignments: $SAVE_RAW_ALIGNMENTS"
 echo_and_log "Timing log:        $TIMING_LOG"
 if [ "$SAVE_TERMINAL_OUTPUT" = true ] && [ -n "$TERMINAL_LOG" ]; then
     echo_and_log "Terminal log:       $TERMINAL_LOG"
@@ -207,7 +217,11 @@ CMD="mDeepFRI predict-function"
 CMD="$CMD --input \"$INPUT_FILE\""
 CMD="$CMD --weights \"$WEIGHTS_PATH\""
 CMD="$CMD --output \"$OUTPUT_DIR\""
-CMD="$CMD --top-k $TOP_K"
+
+# Add top-k if set (defaults to 1 if not specified)
+if [ -n "${TOP_K:-}" ]; then
+    CMD="$CMD --top-k $TOP_K"
+fi
 
 # Add database paths
 if [ ${#DATABASES[@]} -gt 0 ]; then
@@ -248,6 +262,10 @@ fi
 
 if [ "$SAVE_STRUCTURES" = true ]; then
     CMD="$CMD --save-structures"
+fi
+
+if [ "$SAVE_RAW_ALIGNMENTS" = true ]; then
+    CMD="$CMD --save-raw-alignments"
 fi
 
 CMD="$CMD --threads $THREADS"
