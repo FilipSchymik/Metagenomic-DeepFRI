@@ -30,8 +30,8 @@ import numpy as np
 from tqdm import tqdm
 
 from mDeepFRI import DEEPFRI_MODES
-from mDeepFRI.alignment import align_mmseqs_results
-from mDeepFRI.bio_utils import build_align_contact_map
+from mDeepFRI.alignment import AlignmentResult, align_mmseqs_results, align_pairwise
+from mDeepFRI.bio_utils import build_align_contact_map, extract_residues_coordinates
 from mDeepFRI.database import Database, build_database
 from mDeepFRI.mmseqs import MMseqsResult, QueryFile
 from mDeepFRI.pdb import create_pdb_mmseqs, extract_calpha_coords
@@ -266,8 +266,255 @@ def hierarchical_database_search(query_file: QueryFile,
     return dbs
 
 
-def align_pairwise():
-    pass
+STRUCTURE_EXTENSIONS = (".pdb", ".cif")
+
+
+def _resolve_structure_path(
+        structure_ref: str,
+        mapping_dir: pathlib.Path) -> Optional[pathlib.Path]:
+    """
+    Resolve a structure reference from the mapping CSV to an actual file path.
+
+    Accepts:
+        - Absolute paths (e.g. /home/user/structures/7qpl_A.pdb)
+        - Filenames with extension (e.g. 7qpl_A.pdb, 7qpl_A.cif)
+        - Bare identifiers (e.g. 7qpl_A) — resolved by trying .pdb then .cif
+
+    Args:
+        structure_ref (str): Structure reference from the mapping CSV.
+        mapping_dir (pathlib.Path): Directory containing the mapping CSV file,
+            used as the base for resolving relative references.
+
+    Returns:
+        pathlib.Path or None: Resolved path to the structure file, or None if
+            the file could not be found.
+    """
+    ref_path = pathlib.Path(structure_ref)
+
+    # Absolute path
+    if ref_path.is_absolute():
+        if ref_path.exists():
+            return ref_path
+        return None
+
+    # Filename with recognized extension (.pdb or .cif)
+    if ref_path.suffix.lower() in STRUCTURE_EXTENSIONS:
+        full_path = mapping_dir / ref_path
+        if full_path.exists():
+            return full_path
+        if ref_path.exists():
+            return ref_path.resolve()
+        return None
+
+    # Bare identifier — try adding extensions
+    for ext in STRUCTURE_EXTENSIONS:
+        full_path = mapping_dir / (structure_ref + ext)
+        if full_path.exists():
+            return full_path
+
+    return None
+
+
+def _extract_chain(structure_path: pathlib.Path) -> str:
+    """
+    Extract chain identifier from the structure filename.
+
+    Expects filenames in the format ``PDBID_CHAIN.ext`` (e.g. ``7qpl_A.pdb``).
+    If no underscore is found or the suffix after the last underscore is longer
+    than 2 characters, defaults to chain ``"A"``.
+
+    Args:
+        structure_path (pathlib.Path): Path to the structure file.
+
+    Returns:
+        str: Chain identifier (e.g. ``"A"``).
+    """
+    stem = structure_path.stem
+    if "_" in stem:
+        parts = stem.rsplit("_", 1)
+        if len(parts[1]) <= 2:
+            return parts[1]
+    return "A"
+
+
+def _warn_length_mismatch(query_id: str, query_seq: str, struct_seq: str,
+                          structure_ref: str) -> None:
+    """
+    Emit a warning if the query and structure sequences differ by >10% in length.
+
+    Args:
+        query_id (str): Identifier of the query sequence.
+        query_seq (str): Query amino acid sequence.
+        struct_seq (str): Structure-derived amino acid sequence.
+        structure_ref (str): Structure reference identifier.
+    """
+    len_q = len(query_seq)
+    len_s = len(struct_seq)
+    shorter = min(len_q, len_s)
+    longer = max(len_q, len_s)
+    if shorter > 0 and longer / shorter > 1.1:
+        logger.warning(
+            "Length mismatch for %s <-> %s: "
+            "query=%d aa, structure=%d aa (%.1fx difference).", query_id,
+            structure_ref, len_q, len_s, longer / shorter)
+
+
+def load_mapped_structures(
+    query_file: QueryFile,
+    mapping_csv: str,
+    angstrom_contact_threshold: float = 6,
+    generate_contacts: int = 2,
+    alignment_gap_open: float = 10,
+    alignment_gap_continuation: float = 1,
+    scoring_matrix: str = "VTML80",
+    threads: int = 1
+) -> Tuple[List[Tuple[AlignmentResult, np.ndarray]], List[str]]:
+    """
+    Load user-supplied structure-to-query mappings and generate aligned contact maps.
+
+    Reads a two-column CSV file (``query_id,structure_ref``) that maps each query
+    protein to a local PDB or mmCIF structure file.  For every valid mapping the
+    function:
+
+    1. Resolves the structure file path (absolute path, filename with extension,
+       or bare identifier with automatic ``.pdb`` / ``.cif`` extension lookup).
+    2. Extracts residues and Cα coordinates from the structure, applying the same
+       non-standard-residue handling used for PDB database structures.
+    3. Aligns the query sequence to the structure-derived sequence and builds an
+       aligned contact map suitable for GCN prediction.
+    4. Emits a warning when the query and structure sequences differ by more
+       than 10 % in length.
+
+    Args:
+        query_file (QueryFile): Object containing loaded query sequences.
+        mapping_csv (str): Path to the two-column CSV file
+            (``query_id,structure_ref``).
+        angstrom_contact_threshold (float, optional): Distance threshold (Å) for
+            contact map generation.  Defaults to 6.
+        generate_contacts (int, optional): Gap-fill width for contact map alignment.
+            Defaults to 2.
+        alignment_gap_open (float, optional): Gap-open penalty for pairwise alignment.
+            Defaults to 10.
+        alignment_gap_continuation (float, optional): Gap-extension penalty.
+            Defaults to 1.
+        scoring_matrix (str, optional): Scoring matrix name for alignment.
+            Defaults to ``"VTML80"``.
+        threads (int, optional): Number of threads for contact map generation.
+            Defaults to 1.
+
+    Returns:
+        Tuple[List[Tuple[AlignmentResult, np.ndarray]], List[str]]:
+            A tuple of:
+            - List of ``(AlignmentResult, aligned_contact_map)`` tuples for
+              successfully processed mappings.
+            - List of query IDs that were successfully mapped (used to exclude
+              them from subsequent database searches).
+    """
+    mapping_csv = pathlib.Path(mapping_csv)
+    mapping_dir = mapping_csv.parent
+
+    alignments_with_coords = []
+    mapped_query_ids = []
+
+    with open(mapping_csv, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row or len(row) < 2:
+                continue
+
+            query_id = row[0].strip()
+            structure_ref = row[1].strip()
+
+            # ── resolve file path ──────────────────────────────────────
+            structure_path = _resolve_structure_path(structure_ref, mapping_dir)
+            if structure_path is None:
+                logger.warning(
+                    "Structure file not found for %s: %s", query_id,
+                    structure_ref)
+                continue
+
+            # ── determine chain and filetype ───────────────────────────
+            chain = _extract_chain(structure_path)
+            suffix = structure_path.suffix.lower()
+            filetype = "pdb" if suffix == ".pdb" else "mmcif"
+
+            # ── load structure and extract coordinates ─────────────────
+            with open(structure_path, "r", encoding="utf-8") as sf:
+                structure_string = sf.read()
+
+            try:
+                sequence, coords = extract_residues_coordinates(
+                    structure_string, chain=chain, filetype=filetype)
+            except KeyError as e:
+                logger.warning(
+                    "Error extracting coordinates from %s: "
+                    "non-standard residue %s; %s skipped.", structure_path,
+                    str(e), query_id)
+                continue
+            except ValueError as e:
+                logger.warning(
+                    "Error processing %s: %s; %s skipped.", structure_path,
+                    str(e), query_id)
+                continue
+
+            if sequence is None or coords is None:
+                logger.warning(
+                    "No coordinates found in %s; %s skipped.",
+                    structure_path, query_id)
+                continue
+
+            # ── check that query exists ────────────────────────────────
+            if query_id not in query_file.sequences:
+                logger.warning(
+                    "Query %s not found in query file; skipping.", query_id)
+                continue
+
+            query_sequence = query_file.sequences[query_id]
+
+            # ── length mismatch warning ────────────────────────────────
+            _warn_length_mismatch(query_id, query_sequence, sequence,
+                                  structure_ref)
+
+            # ── pairwise alignment ─────────────────────────────────────
+            alignment_string, identity, query_coverage, target_coverage = \
+                align_pairwise(
+                    query_sequence, sequence,
+                    gap_open=int(alignment_gap_open),
+                    gap_extend=int(alignment_gap_continuation),
+                    scoring_matrix=scoring_matrix)
+
+            aln = AlignmentResult(
+                query_name=query_id,
+                query_sequence=query_sequence,
+                target_name=structure_path.stem,
+                target_sequence=sequence,
+                alignment=alignment_string,
+                query_identity=identity,
+                query_coverage=query_coverage,
+                target_coverage=target_coverage,
+                db_name="user_structures",
+                coords=coords)
+
+            alignments_with_coords.append(aln)
+            mapped_query_ids.append(query_id)
+
+    # ── build aligned contact maps (parallelised) ──────────────────────
+    partial_map_align = partial(build_align_contact_map,
+                                threshold=angstrom_contact_threshold,
+                                generated_contacts=generate_contacts)
+
+    with Pool(threads) as p:
+        cmaps = list(p.map(partial_map_align, alignments_with_coords))
+
+    # filter out failed contact maps
+    aligned_cmaps = [cmap for cmap in cmaps if cmap[1] is not None]
+
+    successfully_mapped = [aln.query_name for aln, _ in aligned_cmaps]
+    logger.info(
+        "User-supplied structures: %d/%d mappings produced valid contact maps.",
+        len(aligned_cmaps), len(mapped_query_ids))
+
+    return aligned_cmaps, successfully_mapped
 
 
 def _initialize_processing_modes(modes: List[str],
@@ -333,7 +580,8 @@ def predict_protein_function(
         save_structures: bool = False,
         save_cmaps: bool = False,
         skip_matrix: bool = False,
-        scoring_matrix: str = "VTML80"):
+        scoring_matrix: str = "VTML80",
+        mapped_structures_csv: Optional[str] = None):
     """
     Predict protein function using DeepFRI.
 
@@ -369,12 +617,18 @@ def predict_protein_function(
             Defaults to False.
         scoring_matrix (str, optional): Scoring matrix for alignment.
             Defaults to "VTML80".
+        mapped_structures_csv (str, optional): Path to a two-column CSV file
+            (``query_id,structure_ref``) that maps query sequences to local
+            PDB/CIF structure files.  When provided, these mappings are
+            processed before database searches and take priority.
+            Defaults to None.
 
     Returns:
         None: Results are written to files in output_path.
 
     See Also:
         hierarchical_database_search: For the initial search step.
+        load_mapped_structures: For user-supplied structure mapping.
     """
 
     # load DeepFRI model
@@ -387,6 +641,20 @@ def predict_protein_function(
     output_path.mkdir(parents=True, exist_ok=True)
 
     aligned_cmaps = []
+
+    # ── user-supplied structure mappings (processed first) ─────────────
+    if mapped_structures_csv is not None:
+        user_cmaps, user_mapped_ids = load_mapped_structures(
+            query_file=query_file,
+            mapping_csv=mapped_structures_csv,
+            angstrom_contact_threshold=angstrom_contact_threshold,
+            generate_contacts=generate_contacts,
+            alignment_gap_open=alignment_gap_open,
+            alignment_gap_continuation=alignment_gap_continuation,
+            scoring_matrix=scoring_matrix,
+            threads=threads)
+        aligned_cmaps.extend(user_cmaps)
+
     for db in databases:
         # SEQUENCE ALIGNMENT
         # calculate already aligned sequences

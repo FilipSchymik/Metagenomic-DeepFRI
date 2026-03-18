@@ -416,6 +416,18 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
     show_default=True,
     help="Scoring matrix for sequence alignment (e.g., VTML80, BLOSUM62).",
 )
+@click.option(
+    "--structure-mapping",
+    default=None,
+    type=click.Path(exists=True,
+                    dir_okay=False,
+                    readable=True,
+                    path_type=Path),
+    help="Path to a two-column CSV file (query_id,structure_file) that maps "
+    "query sequences to local PDB or CIF structure files. Structure "
+    "references can be bare identifiers (e.g. 7qpl_A), filenames "
+    "(e.g. 7qpl_A.pdb), or absolute paths.",
+)
 @click.pass_context
 def predict_function(ctx, input, db_path, weights, output, processing_modes,
                      angstrom_contact_thresh, generate_contacts,
@@ -424,7 +436,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                      mmseqs_min_coverage, top_k, alignment_gap_open,
                      alignment_gap_extend, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length, tmpdir,
-                     save_structures, save_cmaps, skip_matrix, scoring_matrix):
+                     save_structures, save_cmaps, skip_matrix, scoring_matrix,
+                     structure_mapping):
     """Predict protein function from sequence."""
 
     logger.info("Starting Metagenomic-DeepFRI.")
@@ -438,20 +451,44 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                                  min_length=min_length,
                                  max_length=max_length)
 
-    deepfri_dbs = hierarchical_database_search(
-        query_file=query_file,
-        output_path=output_path / "database_search",
-        databases=db_path,
-        mmseqs_sensitivity=mmseqs_sensitivity,
-        min_bits=mmseqs_min_bitscore,
-        max_eval=mmseqs_max_evalue,
-        min_ident=mmseqs_min_identity,
-        min_coverage=mmseqs_min_coverage,
-        top_k=top_k,
-        skip_pdb=skip_pdb,
-        overwrite=overwrite,
-        tmpdir=tmpdir,
-        threads=threads)
+    # ── determine which queries already have user-supplied structures ──
+    mapped_ids = set()
+    if structure_mapping is not None:
+        import csv as _csv
+        with open(structure_mapping, "r", encoding="utf-8") as _f:
+            for row in _csv.reader(_f):
+                if row and len(row) >= 2:
+                    mapped_ids.add(row[0].strip())
+
+    # ── database search only for queries without mapped structures ─────
+    unmapped_queries = {
+        qid for qid in query_file.sequences if qid not in mapped_ids
+    }
+
+    if unmapped_queries and mapped_ids:
+        # remove mapped sequences so MMseqs2 only processes unmapped ones
+        query_file.remove_sequences(list(mapped_ids & set(query_file.sequences)))
+
+    if unmapped_queries:
+        deepfri_dbs = hierarchical_database_search(
+            query_file=query_file,
+            output_path=output_path / "database_search",
+            databases=db_path,
+            mmseqs_sensitivity=mmseqs_sensitivity,
+            min_bits=mmseqs_min_bitscore,
+            max_eval=mmseqs_max_evalue,
+            min_ident=mmseqs_min_identity,
+            min_coverage=mmseqs_min_coverage,
+            top_k=top_k,
+            skip_pdb=skip_pdb,
+            overwrite=overwrite,
+            tmpdir=tmpdir,
+            threads=threads)
+    else:
+        logger.info(
+            "All query sequences have user-supplied structures; "
+            "skipping database search.")
+        deepfri_dbs = []
 
     # refresh query file
     # hierarchical_database_search filters out aligned sequences
@@ -475,7 +512,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
         save_structures=save_structures,
         save_cmaps=save_cmaps,
         skip_matrix=skip_matrix,
-        scoring_matrix=scoring_matrix)
+        scoring_matrix=scoring_matrix,
+        mapped_structures_csv=structure_mapping)
 
 
 @main.command()

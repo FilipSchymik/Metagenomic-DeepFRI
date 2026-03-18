@@ -284,6 +284,11 @@ class MMseqsResult(np.recarray):
             >>> result = MMseqsResult.from_mmseqs_result("path/to/file.tsv")
             >>> result.save("path/to/file.tsv")
         """
+        # ensure result_arr is at least 1-d (np.genfromtxt returns a 0-d
+        # numpy.void scalar when there is only one result row, which breaks
+        # rfn.append_fields)
+        self.result_arr = np.atleast_1d(self.result_arr)
+
         # append query file column to the result array
         if self.query_fasta:
             query_col = np.array([self.query_fasta] * len(self.result_arr),
@@ -442,11 +447,12 @@ class MMseqsResult(np.recarray):
                 >>> result = MMseqsResult.from_mmseqs_result("path/to/file.tsv")
         """
 
-        result_arr = np.genfromtxt(filepath,
-                                   delimiter="\t",
-                                   encoding="utf-8",
-                                   names=True,
-                                   dtype=None)
+        result_arr = np.atleast_1d(
+            np.genfromtxt(filepath,
+                          delimiter="\t",
+                          encoding="utf-8",
+                          names=True,
+                          dtype=None))
         return cls(result_arr, query_fasta, database)
 
     @classmethod
@@ -466,11 +472,12 @@ class MMseqsResult(np.recarray):
                 >>> result = MMseqsResult.from_best_matches("path/to/file.tsv")
         """
 
-        result_arr = np.genfromtxt(filepath,
-                                   delimiter="\t",
-                                   encoding="utf-8",
-                                   names=True,
-                                   dtype=None)
+        result_arr = np.atleast_1d(
+            np.genfromtxt(filepath,
+                          delimiter="\t",
+                          encoding="utf-8",
+                          names=True,
+                          dtype=None))
         try:
             query_file = np.unique(result_arr["query_file"])[0]
         except IndexError:
