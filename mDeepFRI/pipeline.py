@@ -319,9 +319,13 @@ def _extract_chain(structure_path: pathlib.Path) -> str:
     """
     Extract chain identifier from the structure filename.
 
-    Expects filenames in the format ``PDBID_CHAIN.ext`` (e.g. ``7qpl_A.pdb``).
-    If no underscore is found or the suffix after the last underscore is longer
-    than 2 characters, defaults to chain ``"A"``.
+    Uses the **last character** after the final underscore in the basename stem
+    (e.g. ``4v42_BI.pdb`` → ``I``, ``6sxu_BBB.pdb`` → ``B``, ``7qpl_A.pdb`` → ``A``).
+    Multi-character suffixes are treated as encodings where only the final
+    character is the chain ID (so ``id_AB`` resolves to chain ``B``, not ``AB``).
+
+    If there is no underscore, or the segment after the last underscore is empty,
+    defaults to chain ``"A"``.
 
     Args:
         structure_path (pathlib.Path): Path to the structure file.
@@ -331,9 +335,9 @@ def _extract_chain(structure_path: pathlib.Path) -> str:
     """
     stem = structure_path.stem
     if "_" in stem:
-        parts = stem.rsplit("_", 1)
-        if len(parts[1]) <= 2:
-            return parts[1]
+        segment = stem.rsplit("_", 1)[1]
+        if segment:
+            return segment[-1]
     return "A"
 
 
