@@ -98,7 +98,7 @@ def get_pdb_seq_coords(
     pdb_id_chain: str,
     query_name: str,
     save_directory: Optional[str] = None
-) -> Tuple[Optional[str], Optional[np.ndarray]]:
+) -> Tuple[Optional[str], Optional[np.ndarray], str, str]:
     """
     Get a sequence and coordinates of a protein chain from the PDB database.
 
@@ -107,7 +107,7 @@ def get_pdb_seq_coords(
         query_name (str): Name of the query sequence. Not essential, used for logging.
 
     Returns:
-        Tuple[str, np.ndarray]: A tuple containing a sequence and coordinates of a protein chain.
+        Tuple of sequence, CA coordinates, mmCIF text, and chain id.
     """
     pdb_id, chain = pdb_id_chain.split("_")
     structure = get_pdb_structure(pdb_id, save_directory=save_directory)
@@ -124,7 +124,7 @@ def get_pdb_seq_coords(
             f"non-standard residue {str(e)} present; {query_name} alignment skipped."
         )
 
-    return sequence, coords
+    return sequence, coords, structure, chain
 
 
 def extract_calpha_coords(db: Database,
@@ -132,9 +132,12 @@ def extract_calpha_coords(db: Database,
                           query_ids: list[str],
                           save_directory: Optional[str] = None,
                           threads: int = 1) -> list[tuple]:
+    """
+    Return one tuple per hit: (coords, template_structure_text, chain, filetype).
 
+    ``template_structure_text`` is mmCIF for pdb100 and PDB text for FoldComp.
+    """
     if "pdb100" in db.name:
-        # add save option
         if save_directory:
             get_pdb_seq_coords_parallel = partial(
                 get_pdb_seq_coords, save_directory=save_directory)
@@ -144,19 +147,21 @@ def extract_calpha_coords(db: Database,
         with Pool(threads) as p:
             results = p.starmap(get_pdb_seq_coords_parallel,
                                 zip(target_ids, query_ids))
-        coords = [coord for _, coord in results]
+        bundles = []
+        for seq, coord, struct, chain in results:
+            bundles.append((coord, struct, chain, "mmcif"))
+        return bundles
 
-    else:
-        suffix = foldcomp_sniff_suffix(target_ids[0], db.foldcomp_db)
-        if suffix:
-            target_ids = [f"{t}{suffix}" for t in target_ids]
-        coords = []
-        with foldcomp.open(db.foldcomp_db, ids=target_ids) as struct_db:
-            for idx, struct in struct_db:
-                _, coord = extract_residues_coordinates(struct, filetype="pdb")
-                coords.append(coord)
-                if save_directory:
-                    with open(save_directory / f"{idx}.pdb", "w") as f:
-                        f.write(struct)
+    suffix = foldcomp_sniff_suffix(target_ids[0], db.foldcomp_db)
+    if suffix:
+        target_ids = [f"{t}{suffix}" for t in target_ids]
+    bundles = []
+    with foldcomp.open(db.foldcomp_db, ids=target_ids) as struct_db:
+        for idx, struct in struct_db:
+            _, coord = extract_residues_coordinates(struct, filetype="pdb")
+            bundles.append((coord, struct, "A", "pdb"))
+            if save_directory:
+                with open(save_directory / f"{idx}.pdb", "w") as f:
+                    f.write(struct)
 
-    return coords
+    return bundles

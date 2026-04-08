@@ -402,6 +402,15 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
     is_flag=True,
     help="Save contact maps of the top hits.",
 )
+
+@click.option(
+    "--save-aligned-structures",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Write carved PDB fragments (template atoms mapped via PyOpal; "
+    "query insertions omitted) to aligned_structures/.",
+)
 @click.option(
     "--skip-matrix",
     default=False,
@@ -437,7 +446,7 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                      alignment_gap_extend, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length, tmpdir,
                      save_structures, save_cmaps, skip_matrix, scoring_matrix,
-                     structure_mapping):
+                     structure_mapping, save_aligned_structures):
     """Predict protein function from sequence."""
 
     logger.info("Starting Metagenomic-DeepFRI.")
@@ -513,7 +522,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
         save_cmaps=save_cmaps,
         skip_matrix=skip_matrix,
         scoring_matrix=scoring_matrix,
-        mapped_structures_csv=structure_mapping)
+        mapped_structures_csv=structure_mapping,
+        save_aligned_structures=save_aligned_structures)
 
 
 @main.command()

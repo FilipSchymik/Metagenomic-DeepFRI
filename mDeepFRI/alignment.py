@@ -22,6 +22,7 @@ Functions:
 import warnings
 from functools import partial
 from multiprocessing import Pool
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -113,7 +114,11 @@ class AlignmentResult:
                  query_coverage: Optional[float] = None,
                  target_coverage: Optional[float] = None,
                  db_name: Optional[str] = None,
-                 coords: Optional[np.ndarray] = None):
+                 coords: Optional[np.ndarray] = None,
+                 template_path: Optional[Path] = None,
+                 template_chain: Optional[str] = None,
+                 template_filetype: Optional[str] = None,
+                 template_structure_string: Optional[str] = None):
 
         self.query_name = query_name
         self.query_sequence = query_sequence
@@ -126,6 +131,10 @@ class AlignmentResult:
         self.insert_gaps()
         self.db_name = db_name
         self.coords = coords
+        self.template_path = template_path
+        self.template_chain = template_chain
+        self.template_filetype = template_filetype
+        self.template_structure_string = template_structure_string
         self.target_coords = None
         self.cmap = None
         self.aligned_cmap = None
