@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import biotite.structure as struc
 import numpy as np
@@ -22,6 +22,43 @@ AA_1_TO_3 = {
     "S": "SER", "T": "THR", "V": "VAL", "W": "TRP", "Y": "TYR",
     "U": "SEC", "O": "PYL", "X": "UNK", "*": "UNK",
 }
+
+
+ThermalKey = Tuple[str, int, str, str]
+
+
+def parse_pdb_occupancy_bfactor(pdb_text: str) -> Dict[ThermalKey, Tuple[float, float]]:
+    """
+    Parse occupancy and temperature factor (e.g. AlphaFold pLDDT) from PDB ATOM/HETATM.
+
+    Biotite often omits these fields when building an ``AtomArray``; this uses
+    fixed columns (PDB v3) so pLDDT survives carving.
+    """
+    lookup: Dict[ThermalKey, Tuple[float, float]] = {}
+    for line in pdb_text.splitlines():
+        if line.startswith("ENDMDL"):
+            break
+        if not (line.startswith("ATOM  ") or line.startswith("HETATM")):
+            continue
+        if len(line) < 66:
+            line = line.ljust(80)
+        try:
+            occ = float(line[54:60])
+            bfac = float(line[60:66])
+        except ValueError:
+            occ, bfac = 1.0, 0.0
+        atom_name = line[12:16].strip()
+        chain = line[21:22].strip() if len(line) > 21 else "A"
+        if not chain:
+            chain = "A"
+        try:
+            resseq = int(line[22:26])
+        except ValueError:
+            continue
+        icode = line[26:27] if len(line) > 26 else " "
+        icode = icode.strip()
+        lookup[(chain, resseq, icode, atom_name)] = (occ, bfac)
+    return lookup
 
 
 def extract_pdb_preamble(pdb_text: str) -> str:
@@ -88,6 +125,40 @@ def _atom_line(serial: int, atom_name: str, res_name: str, chain_id: str,
         f"{x:8.3f}{y:8.3f}{z:8.3f}{occupancy:6.2f}{b_factor:6.2f}          "
         f"{elem:>2s}  \n"
     )
+
+
+def _apply_thermal_from_pdb_lookup(
+        block: struc.AtomArray,
+        lookup: Dict[ThermalKey, Tuple[float, float]]) -> None:
+    """Copy occupancy / B-factor from a PDB column parse into ``block`` annotations."""
+    if not lookup:
+        return
+    n = _array_length(block)
+    bf = np.zeros(n, dtype=np.float64)
+    oc = np.ones(n, dtype=np.float64)
+    for j in range(n):
+        ch = str(block.chain_id[j]).strip()
+        if len(ch) > 1:
+            ch = ch[0]
+        if not ch:
+            ch = "A"
+        rid = int(block.res_id[j])
+        ic = str(block.ins_code[j]).strip()
+        an = str(block.atom_name[j]).strip()
+        key: ThermalKey = (ch, rid, ic, an)
+        occ, bfac = lookup.get(key, lookup.get((ch, rid, "", an), (1.0, 0.0)))
+        oc[j] = occ
+        bf[j] = bfac
+    cats = block.get_annotation_categories()
+    try:
+        if "b_factor" not in cats:
+            block.add_annotation("b_factor", dtype=float)
+        if "occupancy" not in cats:
+            block.add_annotation("occupancy", dtype=float)
+        block.b_factor[:] = bf
+        block.occupancy[:] = oc
+    except Exception as exc:
+        logger.debug("Could not attach B-factors to carved block: %s", exc)
 
 
 def _array_length(arr: struc.AtomArray) -> int:
@@ -187,6 +258,10 @@ def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
         _write_ca_only(alignment, path, preamble, remarks)
         return
 
+    thermal_lookup: Dict[ThermalKey, Tuple[float, float]] = {}
+    if filetype == "pdb":
+        thermal_lookup = parse_pdb_occupancy_bfactor(raw)
+
     try:
         struct = load_structure(
             raw, filetype="mmcif" if filetype == "mmcif" else "pdb")
@@ -216,6 +291,7 @@ def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
                                target_idx, alignment.query_name)
                 _write_ca_only(alignment, path, preamble, remarks)
                 return
+            _apply_thermal_from_pdb_lookup(block, thermal_lookup)
             res3 = AA_1_TO_3.get(q_aa, "UNK")
             block.res_name[:] = res3
             block.res_id[:] = out_res
