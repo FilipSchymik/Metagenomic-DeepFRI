@@ -84,6 +84,7 @@ class AlignmentResult:
             by the alignment.
         target_coverage (float): Fraction (0.0-1.0) of target sequence covered
             by the alignment.
+        alignment_score (float, optional): PyOpal alignment score when available.
         db_name (str): Name of the database from which target was retrieved.
         gapped_sequence (str): Query sequence with gaps ('-') inserted for alignment.
         gapped_target (str): Target sequence with gaps ('-') inserted for alignment.
@@ -118,7 +119,8 @@ class AlignmentResult:
                  template_path: Optional[Path] = None,
                  template_chain: Optional[str] = None,
                  template_filetype: Optional[str] = None,
-                 template_structure_string: Optional[str] = None):
+                 template_structure_string: Optional[str] = None,
+                 alignment_score: Optional[float] = None):
 
         self.query_name = query_name
         self.query_sequence = query_sequence
@@ -138,6 +140,7 @@ class AlignmentResult:
         self.target_coords = None
         self.cmap = None
         self.aligned_cmap = None
+        self.alignment_score = alignment_score
 
     def __str__(self):
         return f"AlignmentResult(query_name={self.query_name}, target_name={self.target_name}, " \
@@ -209,6 +212,10 @@ def align_pairwise(query,
                    scoring_matrix: str = "VTML80"):
     """
     Aligns the query against the target and returns the alignment.
+
+    Returns:
+        Tuple of (alignment_string, identity, query_coverage, target_coverage,
+        alignment_score).
     """
     query = _uppercase_sequence(query)
     target = _uppercase_sequence(target)
@@ -221,12 +228,14 @@ def align_pairwise(query,
     database = pyopal.Database([target], alphabet=custom_alphabet)
     # Align the sequences
     alignment = aligner.align(query, database, algorithm="nw", mode="full")
-    alignment_string = alignment[0].alignment
-    identity = alignment[0].identity()
-    query_coverage = alignment[0].coverage(reference="query")
-    target_coverage = alignment[0].coverage(reference="target")
+    hit = alignment[0]
+    alignment_string = hit.alignment
+    identity = hit.identity()
+    query_coverage = hit.coverage(reference="query")
+    target_coverage = hit.coverage(reference="target")
+    score = float(hit.score)
 
-    return alignment_string, identity, query_coverage, target_coverage
+    return alignment_string, identity, query_coverage, target_coverage, score
 
 
 def pairwise_against_database(query_id,
@@ -245,7 +254,7 @@ def pairwise_against_database(query_id,
                                               scoring_matrix)
 
     # align the query against the best hit
-    alignment, identity, query_coverage, target_coverage = align_pairwise(
+    alignment, identity, query_coverage, target_coverage, score = align_pairwise(
         query_sequence, best_target, gap_open, gap_extend, scoring_matrix)
     # create an alignment object
     alignment_result = AlignmentResult(query_id,
@@ -255,7 +264,8 @@ def pairwise_against_database(query_id,
                                        alignment,
                                        identity,
                                        query_coverage=query_coverage,
-                                       target_coverage=target_coverage)
+                                       target_coverage=target_coverage,
+                                       alignment_score=score)
     return alignment_result
 
 

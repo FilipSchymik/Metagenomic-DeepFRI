@@ -19,6 +19,7 @@ Attributes:
 
 import csv
 import logging
+from collections import defaultdict
 import pathlib
 import pickle
 import sys
@@ -61,6 +62,26 @@ FINAL_OUTPUT_HEADER = [
 ]
 
 NAN_ALIGNMENT_INFO = [np.nan] * 6
+
+
+def _raw_alignment_fasta_record(aln: AlignmentResult) -> str:
+    """One pairwise block: two FASTA records, gapped sequences, alignment comment."""
+    qid = aln.query_name
+    tid = aln.target_name
+    ident = float(aln.query_identity) if aln.query_identity is not None else float(
+        "nan")
+    cov = float(aln.query_coverage) if aln.query_coverage is not None else float(
+        "nan")
+    score = aln.alignment_score
+    score_str = f"{score:g}" if score is not None else "NA"
+    meta = f"|identity={ident:.4f}|coverage={cov:.4f}|score={score_str}"
+    return "\n".join([
+        f">{qid}|target={tid}{meta}",
+        aln.gapped_sequence,
+        f">{tid}|query={qid}{meta}",
+        aln.gapped_target,
+        f"#alignment_string: {aln.alignment}",
+    ])
 
 
 def load_query_file(query_file: str,
@@ -481,7 +502,7 @@ def load_mapped_structures(
                                   structure_ref)
 
             # ── pairwise alignment ─────────────────────────────────────
-            alignment_string, identity, query_coverage, target_coverage = \
+            alignment_string, identity, query_coverage, target_coverage, aln_score = \
                 align_pairwise(
                     query_sequence, sequence,
                     gap_open=int(alignment_gap_open),
@@ -497,6 +518,7 @@ def load_mapped_structures(
                 query_identity=identity,
                 query_coverage=query_coverage,
                 target_coverage=target_coverage,
+                alignment_score=aln_score,
                 db_name="user_structures",
                 coords=coords,
                 template_path=structure_path,
@@ -590,7 +612,8 @@ def predict_protein_function(
         skip_matrix: bool = False,
         scoring_matrix: str = "VTML80",
         mapped_structures_csv: Optional[str] = None,
-        save_aligned_structures: bool = False):
+        save_aligned_structures: bool = False,
+        save_raw_alignments: bool = False):
     """
     Predict protein function using DeepFRI.
 
@@ -634,6 +657,10 @@ def predict_protein_function(
         save_aligned_structures (bool, optional): Write carved PDB fragments
             (template atoms mapped through PyOpal; query insertions omitted)
             under ``aligned_structures/``. Defaults to False.
+        save_raw_alignments (bool, optional): If True, write per-database
+            ``{db_name}_raw_alignments.fasta`` in the output directory with
+            gapped query/target sequences and a ``#alignment_string`` line for
+            each query that has a valid aligned contact map. Defaults to False.
 
     Returns:
         None: Results are written to files in output_path.
@@ -803,6 +830,17 @@ def predict_protein_function(
         for query_id in unaligned_queries:
             tsv_writer.writerow(
                 [query_id, False, np.nan, np.nan, np.nan, np.nan, np.nan])
+
+    if save_raw_alignments and aligned_cmaps:
+        by_db: Dict[str, List[AlignmentResult]] = defaultdict(list)
+        for aln, _ in aligned_cmaps:
+            key = aln.db_name if aln.db_name is not None else "unknown"
+            by_db[key].append(aln)
+        for db_name, alns in by_db.items():
+            safe = db_name.replace("/", "_").replace("\\", "_")
+            fasta_path = output_path / f"{safe}_raw_alignments.fasta"
+            blocks = [_raw_alignment_fasta_record(aln) for aln in alns]
+            fasta_path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
 
     ### FUNCTION PREDICTION ###
     # sort cmaps by length of query sequence

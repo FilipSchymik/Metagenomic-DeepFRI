@@ -412,6 +412,14 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
     "query insertions omitted) to aligned_structures/.",
 )
 @click.option(
+    "--save-raw-alignments",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Write per-database *_raw_alignments.fasta (gapped query/target, "
+    "#alignment_string) for queries with a valid aligned contact map.",
+)
+@click.option(
     "--skip-matrix",
     default=False,
     type=bool,
@@ -446,7 +454,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                      alignment_gap_extend, remove_intermediate, overwrite,
                      threads, skip_pdb, min_length, max_length, tmpdir,
                      save_structures, save_cmaps, skip_matrix, scoring_matrix,
-                     structure_mapping, save_aligned_structures):
+                     structure_mapping, save_aligned_structures,
+                     save_raw_alignments):
     """Predict protein function from sequence."""
 
     logger.info("Starting Metagenomic-DeepFRI.")
@@ -523,7 +532,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
         skip_matrix=skip_matrix,
         scoring_matrix=scoring_matrix,
         mapped_structures_csv=structure_mapping,
-        save_aligned_structures=save_aligned_structures)
+        save_aligned_structures=save_aligned_structures,
+        save_raw_alignments=save_raw_alignments)
 
 
 @main.command()
