@@ -64,6 +64,13 @@ FINAL_OUTPUT_HEADER = [
 NAN_ALIGNMENT_INFO = [np.nan] * 6
 
 
+def _write_carved_structure_worker(
+        args: Tuple[AlignmentResult, pathlib.Path]) -> None:
+    """Picklable worker for parallel carved PDB export (``save_aligned_structures``)."""
+    aln, out_path = args
+    write_carved_structure_pdb(aln, out_path)
+
+
 def _raw_alignment_fasta_record(aln: AlignmentResult) -> str:
     """One pairwise block: two FASTA records, gapped sequences, alignment comment."""
     qid = aln.query_name
@@ -828,8 +835,18 @@ def predict_protein_function(
     if save_aligned_structures:
         as_dir = output_path / "aligned_structures"
         as_dir.mkdir(parents=True, exist_ok=True)
-        for aln, _cmap in aligned_cmaps:
-            write_carved_structure_pdb(aln, as_dir / f"{aln.query_name}.pdb")
+        carved_tasks = [(aln, as_dir / f"{aln.query_name}.pdb")
+                        for aln, _cmap in aligned_cmaps]
+        if carved_tasks:
+            if threads > 1:
+                logger.info(
+                    "Writing %d carved structures (%d parallel workers).",
+                    len(carved_tasks), threads)
+                with Pool(threads) as pool:
+                    pool.map(_write_carved_structure_worker, carved_tasks)
+            else:
+                for task in carved_tasks:
+                    _write_carved_structure_worker(task)
 
     aligned_queries = [aln[0].query_name for aln in aligned_cmaps]
     unaligned_queries = {
