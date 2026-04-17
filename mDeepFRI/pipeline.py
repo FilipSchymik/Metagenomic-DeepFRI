@@ -337,17 +337,36 @@ def _resolve_structure_path(
     return None
 
 
+def _stem_has_pdb_entry_id_prefix(stem: str) -> bool:
+    """
+    True if the stem looks like ``<PDB_ID>_<suffix>`` (wwPDB four-character id).
+
+    Only then do we infer the chain from the filename; metagenome / AF / ESM
+    identifiers with underscores (e.g. ``gene_00769_model``) default to chain A.
+    """
+    if "_" not in stem:
+        return False
+    head = stem.split("_", 1)[0]
+    if len(head) != 4 or not head[0].isdigit():
+        return False
+    return all(ch.isalnum() for ch in head[1:])
+
+
 def _extract_chain(structure_path: pathlib.Path) -> str:
     """
-    Extract chain identifier from the structure filename.
+    Extract chain identifier from the structure filename when it is PDB-like.
 
-    Uses the **last character** after the final underscore in the basename stem
-    (e.g. ``4v42_BI.pdb`` → ``I``, ``6sxu_BBB.pdb`` → ``B``, ``7qpl_A.pdb`` → ``A``).
-    Multi-character suffixes are treated as encodings where only the final
-    character is the chain ID (so ``id_AB`` resolves to chain ``B``, not ``AB``).
+    For stems whose first ``_``-separated segment is a four-character PDB entry
+    id (digit + three alphanumerics), uses the **last character** after the
+    final underscore (e.g. ``4v42_BI.pdb`` → ``I``, ``6sxu_BBB.pdb`` → ``B``,
+    ``7qpl_A.pdb`` → ``A``). Multi-character suffixes use only the final
+    character as the chain id (``id_AB`` → ``B``).
 
-    If there is no underscore, or the segment after the last underscore is empty,
-    defaults to chain ``"A"``.
+    If the segment after the last underscore is two or more digits only (e.g.
+    batch or ordinal ids), returns ``"A"`` — those are not chain ids.
+
+    For all other filenames (no underscore, or non-PDB-style prefix such as
+    ``MGYG..._01599`` or ``..._model``), returns ``"A"``.
 
     Args:
         structure_path (pathlib.Path): Path to the structure file.
@@ -356,11 +375,14 @@ def _extract_chain(structure_path: pathlib.Path) -> str:
         str: Chain identifier (e.g. ``"A"``).
     """
     stem = structure_path.stem
-    if "_" in stem:
-        segment = stem.rsplit("_", 1)[1]
-        if segment:
-            return segment[-1]
-    return "A"
+    if not _stem_has_pdb_entry_id_prefix(stem):
+        return "A"
+    segment = stem.rsplit("_", 1)[1]
+    if not segment:
+        return "A"
+    if len(segment) >= 2 and segment.isdigit():
+        return "A"
+    return segment[-1]
 
 
 def _warn_length_mismatch(query_id: str, query_seq: str, struct_seq: str,
