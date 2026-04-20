@@ -511,6 +511,14 @@ def load_mapped_structures(
                     "Error processing %s: %s; %s skipped.", structure_path,
                     str(e), query_id)
                 continue
+            except TypeError as e:
+                # e.g. biotite PDB/mmCIF parse yields invalid stack shape
+                logger.warning(
+                    "Structure load failed for query %s from %s: %s. "
+                    "Falling back to hierarchical database search if databases "
+                    "were configured; otherwise sequence-only (CNN) DeepFRI.",
+                    query_id, structure_path, e)
+                continue
 
             if sequence is None or coords is None:
                 logger.warning(
