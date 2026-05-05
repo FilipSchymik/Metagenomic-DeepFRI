@@ -1,6 +1,7 @@
 import importlib.metadata
 import itertools
 import logging
+import shlex
 import sys
 from pathlib import Path
 import os
@@ -363,6 +364,26 @@ def search_databases(input, output, db_path, sensitivity, min_length,
               help="Use a precomputed MMseqs2 best-match TSV instead of running a new search.")
 @click.option("--skip-prediction", default=False, is_flag=True,
               help="Skip GO-term prediction. Will still perform alignments and contact map generation.")
+@click.option(
+    "--eggnog-output",
+    default=False,
+    is_flag=True,
+    help="Write results.tsv in EggNOG-style TSV (## run metadata, # header, one row per query, GOs and EC).",
+)
+@click.option(
+    "--gcn-score-threshold",
+    default=0.3,
+    type=click.FloatRange(0.0, 1.0),
+    show_default=True,
+    help="Minimum DeepFRI score to report GCN predictions.",
+)
+@click.option(
+    "--cnn-score-threshold",
+    default=0.2,
+    type=click.FloatRange(0.0, 1.0),
+    show_default=True,
+    help="Minimum DeepFRI score to report CNN predictions.",
+)
 
 def predict_function(input, db_path, weights, output, processing_modes,
                      angstrom_contact_thresh, generate_contacts,
@@ -374,7 +395,8 @@ def predict_function(input, db_path, weights, output, processing_modes,
                      threads, skip_pdb, min_length, max_length,
                      save_structures, save_cmaps, save_raw_alignments, identity_bin, 
                      identity_max, per_query, drop_self_hits, seed, precomputed_tsv,
-                     skip_prediction):
+                     skip_prediction, eggnog_output, gcn_score_threshold,
+                     cnn_score_threshold):
     """Predict protein function from sequence."""
     logger.info("Starting Metagenomic-DeepFRI.")
 
@@ -412,7 +434,11 @@ def predict_function(input, db_path, weights, output, processing_modes,
     logger.info("Maximum length:                %s", max_length)
     logger.info("Save structures:               %s", save_structures)
     logger.info("Save contact maps:             %s", save_cmaps)
-    
+    logger.info("EggNOG-style results.tsv:      %s", eggnog_output)
+    logger.info("GCN score threshold:           %s", gcn_score_threshold)
+    logger.info("CNN score threshold:           %s", cnn_score_threshold)
+    eggnog_invocation_command = shlex.join(sys.argv) if eggnog_output else None
+
     # Parse identity_bin list
     identity_bins = []
     if identity_bin:
@@ -568,7 +594,11 @@ def predict_function(input, db_path, weights, output, processing_modes,
             remove_intermediate=remove_intermediate_this_iter,
             save_structures=save_structures,
                 save_cmaps=save_cmaps,
-                precomputed_alignments=precomputed_alignments)  # Reuse alignments!
+                precomputed_alignments=precomputed_alignments,
+                eggnog_output=eggnog_output,
+                eggnog_invocation_command=eggnog_invocation_command,
+                gcn_score_threshold=gcn_score_threshold,
+                cnn_score_threshold=cnn_score_threshold)
 
 
 @main.command()

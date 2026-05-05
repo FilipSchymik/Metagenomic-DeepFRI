@@ -45,6 +45,9 @@ OUTPUT_HEADER = [
     'DeepFRI_mode', 'DB_hit', 'DB_name', 'Identity', 'Coverage'
 ]
 
+# EggNOG-style annotation TSV: hash-prefixed header, one row per query, GOs as comma-separated.
+EGGNOG_OUTPUT_HEADER = ["#query", "GOs", "EC"]
+
 __all__ = [
     "QueryFile",
     "MMSeqsResult",

@@ -1,17 +1,20 @@
 import csv
+import importlib.metadata
 import logging
 import pathlib
 import pickle
 import sys
+import time
+from collections import defaultdict
 from pathlib import Path
 from functools import partial
 from multiprocessing import Pool
-from typing import Iterable, List, Tuple
+from typing import DefaultDict, Iterable, List, Set, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
-from mDeepFRI import BAR_FORMAT, DEEPFRI_MODES, OUTPUT_HEADER
+from mDeepFRI import BAR_FORMAT, DEEPFRI_MODES, EGGNOG_OUTPUT_HEADER, OUTPUT_HEADER
 from mDeepFRI.alignment import align_mmseqs_results
 from mDeepFRI.bio_utils import build_align_contact_map
 from mDeepFRI.database import Database, build_database
@@ -29,6 +32,58 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+
+def _eggnog_join_field(terms: Set[str]) -> str:
+    """Comma-separated sorted terms, or '-' when empty (EggNOG convention)."""
+    if not terms:
+        return "-"
+    return ",".join(sorted(terms))
+
+
+def _write_eggnog_file_preamble(buffer, invocation_command: str | None = None) -> None:
+    """EggNOG-style leading comment lines (##) before the tabular header."""
+    buffer.write(f"## {time.ctime()}\n")
+    try:
+        pkg_ver = importlib.metadata.version("mDeepFRI")
+    except importlib.metadata.PackageNotFoundError:
+        pkg_ver = "unknown"
+    buffer.write(f"## mDeepFRI-{pkg_ver}\n")
+    cmd = invocation_command if invocation_command is not None else " ".join(
+        sys.argv)
+    buffer.write(f"## {cmd}\n")
+    buffer.write("##\n")
+
+
+def _collect_eggnog_row(
+        eggnog_gos: DefaultDict[str, Set[str]],
+        eggnog_ecs: DefaultDict[str, Set[str]],
+        row: List,
+) -> None:
+    """Merge one long-format prediction row into per-protein GO / EC sets."""
+    if len(row) < 6:
+        return
+    protein, term, mode = row[0], row[1], row[5]
+    term_s = term if isinstance(term, str) else str(term)
+    if term_s.startswith("GO:"):
+        eggnog_gos[protein].add(term_s)
+    elif mode == "ec":
+        eggnog_ecs[protein].add(term_s)
+
+
+def _filter_prediction_rows_by_score(rows: List, score_threshold: float) -> List:
+    """Keep rows whose DeepFRI score (index 2) is >= score_threshold."""
+    filtered: List = []
+    for row in rows:
+        if len(row) < 3:
+            continue
+        try:
+            score = float(row[2])
+        except (TypeError, ValueError):
+            continue
+        if score >= score_threshold:
+            filtered.append(row)
+    return filtered
 
 
 # load sequences in query filtered by length
@@ -374,6 +429,10 @@ def predict_protein_function(
     drop_self_hits: bool = True,
     precomputed_alignments: dict = None,  # Optional: reuse alignments from prepare_alignments_for_identity_bin
     save_raw_alignments: bool = False,
+    eggnog_output: bool = False,
+    eggnog_invocation_command: str | None = None,
+    gcn_score_threshold: float = 0.3,
+    cnn_score_threshold: float = 0.2,
 ):
 
     # load DeepFRI model
@@ -509,7 +568,13 @@ def predict_protein_function(
         output_file_name = output_path / "results.tsv"
         output_buffer = open(output_file_name, "w", encoding="utf-8")
         csv_writer = csv.writer(output_buffer, delimiter="\t")
-        csv_writer.writerow(OUTPUT_HEADER)
+        if eggnog_output:
+            eggnog_gos: DefaultDict[str, Set[str]] = defaultdict(set)
+            eggnog_ecs: DefaultDict[str, Set[str]] = defaultdict(set)
+        else:
+            csv_writer.writerow(OUTPUT_HEADER)
+        logger.info("GCN score threshold (min):       %s", gcn_score_threshold)
+        logger.info("CNN score threshold (min):       %s", cnn_score_threshold)
 
         for i, mode in enumerate(deepfri_processing_modes):
             logger.info("Processing mode: %s; %i/%i", DEEPFRI_MODES[mode], i + 1,
@@ -536,6 +601,8 @@ def predict_protein_function(
                         seqres=aln.query_sequence,
                         cmap=aligned_cmap,
                         chain=str(aln.query_name))
+                    prediction_rows = _filter_prediction_rows_by_score(
+                        prediction_rows, gcn_score_threshold)
 
                     for row in prediction_rows:
                         deepfri_info = [net_type, mode]
@@ -548,7 +615,10 @@ def predict_protein_function(
                             aln.target_name.rsplit(".", 1)[0], aln.db_name,
                             aln.query_identity, aln.query_coverage
                         ])
-                        csv_writer.writerow(row)
+                        if eggnog_output:
+                            _collect_eggnog_row(eggnog_gos, eggnog_ecs, row)
+                        else:
+                            csv_writer.writerow(row)
 
                 del gcn
 
@@ -567,13 +637,33 @@ def predict_protein_function(
 
                     prediction_rows = cnn.predict_function(
                         seqres=unaligned_queries[query_id], chain=str(query_id))
+                    prediction_rows = _filter_prediction_rows_by_score(
+                        prediction_rows, cnn_score_threshold)
                     for row in prediction_rows:
                         row.extend([net_type, mode])
                         row.extend([np.nan, np.nan, np.nan])
-                        csv_writer.writerow(row)
+                        if eggnog_output:
+                            _collect_eggnog_row(eggnog_gos, eggnog_ecs, row)
+                        else:
+                            csv_writer.writerow(row)
 
                 del cnn
 
+        if eggnog_output:
+            predicted_ids = {aln.query_name for aln, _ in aligned_cmaps} | set(
+                unaligned_queries.keys())
+            protein_order = [
+                q for q in query_file.sequences if q in predicted_ids
+            ]
+            _write_eggnog_file_preamble(output_buffer,
+                                        invocation_command=eggnog_invocation_command)
+            csv_writer.writerow(EGGNOG_OUTPUT_HEADER)
+            for pid in protein_order:
+                csv_writer.writerow([
+                    pid,
+                    _eggnog_join_field(eggnog_gos[pid]),
+                    _eggnog_join_field(eggnog_ecs[pid]),
+                ])
         output_buffer.close()
     else:
         logger.info("Skipped GO-term prediction (no processing modes specified). "
