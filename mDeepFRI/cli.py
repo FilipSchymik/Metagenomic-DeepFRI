@@ -420,6 +420,14 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
     "#alignment_string) for queries with a valid aligned contact map.",
 )
 @click.option(
+    "--save-alignment-metadata",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Write alignment_metadata.tsv with length and query-insertion stats "
+    "for each successfully aligned query.",
+)
+@click.option(
     "--skip-matrix",
     default=False,
     type=bool,
@@ -455,7 +463,7 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                      threads, skip_pdb, min_length, max_length, tmpdir,
                      save_structures, save_cmaps, skip_matrix, scoring_matrix,
                      structure_mapping, save_aligned_structures,
-                     save_raw_alignments):
+                     save_raw_alignments, save_alignment_metadata):
     """Predict protein function from sequence."""
 
     logger.info("Starting Metagenomic-DeepFRI.")
@@ -534,7 +542,8 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
         scoring_matrix=scoring_matrix,
         mapped_structures_csv=structure_mapping,
         save_aligned_structures=save_aligned_structures,
-        save_raw_alignments=save_raw_alignments)
+        save_raw_alignments=save_raw_alignments,
+        save_alignment_metadata=save_alignment_metadata)
 
 
 @main.command()

@@ -31,7 +31,8 @@ import numpy as np
 from tqdm import tqdm
 
 from mDeepFRI import DEEPFRI_MODES
-from mDeepFRI.alignment import AlignmentResult, align_mmseqs_results, align_pairwise
+from mDeepFRI.alignment import (AlignmentResult, align_mmseqs_results,
+                                align_pairwise, alignment_metadata_row)
 from mDeepFRI.bio_utils import build_align_contact_map, extract_residues_coordinates
 from mDeepFRI.database import Database, build_database
 from mDeepFRI.mmseqs import MMseqsResult, QueryFile
@@ -54,6 +55,11 @@ logger.setLevel(logging.INFO)
 ALIGNMENT_HEADER = [
     "query_id", "aligned", "target_id", "db_name", "query_identity",
     "query_coverage", "target_coverage"
+]
+ALIGNMENT_METADATA_HEADER = [
+    "query_id", "target_id", "query_length", "target_length", "delta_length",
+    "query_insertion_runs", "query_insertion_residues",
+    "mean_query_insertion_length", "max_query_insertion_length",
 ]
 FINAL_OUTPUT_HEADER = [
     "protein", "network_type", "prediction_mode", "go_term", "score",
@@ -392,28 +398,6 @@ def _extract_chain(structure_path: pathlib.Path) -> str:
     return segment[-1]
 
 
-def _warn_length_mismatch(query_id: str, query_seq: str, struct_seq: str,
-                          structure_ref: str) -> None:
-    """
-    Emit a warning if the query and structure sequences differ by >10% in length.
-
-    Args:
-        query_id (str): Identifier of the query sequence.
-        query_seq (str): Query amino acid sequence.
-        struct_seq (str): Structure-derived amino acid sequence.
-        structure_ref (str): Structure reference identifier.
-    """
-    len_q = len(query_seq)
-    len_s = len(struct_seq)
-    shorter = min(len_q, len_s)
-    longer = max(len_q, len_s)
-    if shorter > 0 and longer / shorter > 1.1:
-        logger.warning(
-            "Length mismatch for %s <-> %s: "
-            "query=%d aa, structure=%d aa (%.1fx difference).", query_id,
-            structure_ref, len_q, len_s, longer / shorter)
-
-
 def load_mapped_structures(
     query_file: QueryFile,
     mapping_csv: str,
@@ -437,8 +421,6 @@ def load_mapped_structures(
        non-standard-residue handling used for PDB database structures.
     3. Aligns the query sequence to the structure-derived sequence and builds an
        aligned contact map suitable for GCN prediction.
-    4. Emits a warning when the query and structure sequences differ by more
-       than 10 % in length.
 
     Args:
         query_file (QueryFile): Object containing loaded query sequences.
@@ -533,10 +515,6 @@ def load_mapped_structures(
                 continue
 
             query_sequence = query_file.sequences[query_id]
-
-            # ── length mismatch warning ────────────────────────────────
-            _warn_length_mismatch(query_id, query_sequence, sequence,
-                                  structure_ref)
 
             # ── pairwise alignment ─────────────────────────────────────
             alignment_string, identity, query_coverage, target_coverage, aln_score = \
@@ -650,7 +628,8 @@ def predict_protein_function(
         scoring_matrix: str = "VTML80",
         mapped_structures_csv: Optional[str] = None,
         save_aligned_structures: bool = False,
-        save_raw_alignments: bool = False):
+        save_raw_alignments: bool = False,
+        save_alignment_metadata: bool = False):
     """
     Predict protein function using DeepFRI.
 
@@ -698,6 +677,9 @@ def predict_protein_function(
             ``{db_name}_raw_alignments.fasta`` in the output directory with
             gapped query/target sequences and a ``#alignment_string`` line for
             each query that has a valid aligned contact map. Defaults to False.
+        save_alignment_metadata (bool, optional): If True, write
+            ``alignment_metadata.tsv`` with per-alignment length and query
+            insertion statistics. Defaults to False.
 
     Returns:
         None: Results are written to files in output_path.
@@ -877,6 +859,14 @@ def predict_protein_function(
         for query_id in unaligned_queries:
             tsv_writer.writerow(
                 [query_id, False, np.nan, np.nan, np.nan, np.nan, np.nan])
+
+    if save_alignment_metadata and aligned_cmaps:
+        metadata_file = output_path / "alignment_metadata.tsv"
+        with open(metadata_file, "w", encoding="utf-8") as meta_output:
+            meta_writer = csv.writer(meta_output, delimiter="\t")
+            meta_writer.writerow(ALIGNMENT_METADATA_HEADER)
+            for aln, _ in aligned_cmaps:
+                meta_writer.writerow(alignment_metadata_row(aln))
 
     if save_raw_alignments and aligned_cmaps:
         by_db: Dict[str, List[AlignmentResult]] = defaultdict(list)

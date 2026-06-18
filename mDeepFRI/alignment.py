@@ -23,7 +23,7 @@ import warnings
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyopal
@@ -61,6 +61,53 @@ def insert_gaps(sequence: str, reference: str,
         elif a == "D":
             reference_list.insert(i, "-")
     return "".join(sequence_list), "".join(reference_list)
+
+
+def compute_query_insertion_stats(
+        gapped_query: str, gapped_target: str) -> Dict[str, float]:
+    """
+    Summarize query insertions (query residue aligned to a target gap).
+
+    Returns counts of contiguous insertion runs and per-run length statistics.
+    """
+    run_lengths: List[int] = []
+    current_run = 0
+    for q, t in zip(gapped_query, gapped_target):
+        if q != "-" and t == "-":
+            current_run += 1
+        elif current_run > 0:
+            run_lengths.append(current_run)
+            current_run = 0
+    if current_run > 0:
+        run_lengths.append(current_run)
+
+    total = sum(run_lengths)
+    runs = len(run_lengths)
+    return {
+        "query_insertion_runs": runs,
+        "query_insertion_residues": total,
+        "mean_query_insertion_length": (total / runs) if runs else 0.0,
+        "max_query_insertion_length": max(run_lengths) if run_lengths else 0,
+    }
+
+
+def alignment_metadata_row(aln: "AlignmentResult") -> List:
+    """Build one TSV row of alignment length/insertion metadata."""
+    stats = compute_query_insertion_stats(aln.gapped_sequence,
+                                          aln.gapped_target)
+    query_length = len(aln.query_sequence)
+    target_length = len(aln.target_sequence)
+    return [
+        aln.query_name,
+        aln.target_name,
+        query_length,
+        target_length,
+        query_length - target_length,
+        stats["query_insertion_runs"],
+        stats["query_insertion_residues"],
+        stats["mean_query_insertion_length"],
+        stats["max_query_insertion_length"],
+    ]
 
 
 class AlignmentResult:
