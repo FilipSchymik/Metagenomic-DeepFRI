@@ -692,7 +692,7 @@ def predict_protein_function(
             processed before database searches and take priority.
             Defaults to None.
         save_aligned_structures (bool, optional): Write carved PDB fragments
-            (template atoms mapped through PyOpal; query insertions omitted)
+            (query SEQRES and residue numbering; template atoms where aligned)
             under ``aligned_structures/``. Defaults to False.
         save_raw_alignments (bool, optional): If True, write per-database
             ``{db_name}_raw_alignments.fasta`` in the output directory with

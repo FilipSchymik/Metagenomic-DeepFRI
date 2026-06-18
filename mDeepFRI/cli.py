@@ -408,8 +408,8 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
     default=False,
     type=bool,
     is_flag=True,
-    help="Write carved PDB fragments (template atoms mapped via PyOpal; "
-    "query insertions omitted) to aligned_structures/.",
+    help="Write carved PDB fragments (query SEQRES/numbering; template atoms "
+    "where aligned) to aligned_structures/.",
 )
 @click.option(
     "--save-raw-alignments",

@@ -73,17 +73,71 @@ def extract_pdb_preamble(pdb_text: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _iter_matched_columns(
-        gapped_query: str, gapped_target: str) -> Iterator[Tuple[int, str]]:
+def extract_pdb_preamble_without_seqres(pdb_text: str) -> str:
+    """Return template header records, omitting ``SEQRES`` (replaced by query SEQRES)."""
+    lines: List[str] = []
+    for line in pdb_text.splitlines():
+        rec = line[:6].strip().upper()
+        if rec in ("ATOM", "HETATM", "MODEL", "ENDMDL"):
+            break
+        if rec == "SEQRES":
+            continue
+        lines.append(line)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def format_seqres_lines(sequence: str, chain_id: str = "A") -> List[str]:
+    """Build PDB ``SEQRES`` records for a one-letter query sequence."""
+    num_res = len(sequence)
+    codes = [AA_1_TO_3.get(aa.upper(), "UNK") for aa in sequence]
+    lines: List[str] = []
+    ser_num = 1
+    for start in range(0, len(codes), 13):
+        chunk = codes[start:start + 13]
+        res_field = "".join(f"{code:3s} " for code in chunk)
+        lines.append(
+            f"SEQRES {ser_num:3d} {chain_id} {num_res:4d} {res_field}".rstrip())
+        ser_num += 1
+    return lines
+
+
+def _build_preamble_header(template_preamble: str,
+                           query_sequence: str) -> str:
+    parts: List[str] = []
+    if template_preamble:
+        parts.append(template_preamble.rstrip("\n"))
+    for line in format_seqres_lines(query_sequence):
+        parts.append(line)
+    if not parts:
+        return ""
+    return "\n".join(parts) + "\n"
+
+
+def _iter_query_columns(
+        gapped_query: str,
+        gapped_target: str) -> Iterator[Tuple[int, str, Optional[int]]]:
+    """
+    Yield one entry per query residue: (1-based query index, AA, target index).
+
+    ``target_idx`` is ``None`` when the query residue has no template coordinates
+    (query insertion relative to template). Those positions are omitted from ATOM
+    records but keep their index in ``SEQRES`` and create gaps in ``resSeq``.
+    """
     target_idx = 0
+    query_idx = 0
     for q, t in zip(gapped_query, gapped_target):
         if q == "-":
             if t != "-":
                 target_idx += 1
         else:
+            query_idx += 1
             if t != "-":
-                yield target_idx, q.upper()
+                yield query_idx, q.upper(), target_idx
                 target_idx += 1
+            else:
+                yield query_idx, q.upper(), None
 
 
 def _remark_lines(alignment: AlignmentResult, template_label: str) -> List[str]:
@@ -91,7 +145,7 @@ def _remark_lines(alignment: AlignmentResult, template_label: str) -> List[str]:
     return [
         "REMARK 999 METAGENOMIC-DEEPFRI CARVED STRUCTURE FRAGMENT",
         "REMARK 999 TEMPLATE RESIDUES MAPPED TO QUERY VIA PYOPAL ALIGNMENT.",
-        "REMARK 999 QUERY INSERTIONS (RELATIVE TO TEMPLATE) ARE OMITTED.",
+        "REMARK 999 RESIDUE NUMBERING FOLLOWS QUERY; ATOMS ONLY WHERE TEMPLATE COVERS.",
         f"REMARK 999 QUERY_ID: {alignment.query_name}",
         f"REMARK 999 TARGET_ID: {alignment.target_name}",
         f"REMARK 999 TEMPLATE: {template_label}",
@@ -192,24 +246,27 @@ def _write_atom_array_records(atom_array: struc.AtomArray) -> str:
     return "".join(lines)
 
 
-def _write_ca_only(alignment: AlignmentResult, path: Path, preamble: str,
-                   remarks: List[str]) -> None:
+def _write_ca_only(alignment: AlignmentResult, path: Path,
+                   template_preamble: str, remarks: List[str]) -> None:
     coords = alignment.coords
     if coords is None:
         logger.warning("Cannot export carved PDB for %s: no CA coordinates.",
                        alignment.query_name)
         return
     parts: List[str] = []
-    if preamble:
-        parts.append(preamble)
+    header = _build_preamble_header(template_preamble,
+                                    alignment.query_sequence)
+    if header:
+        parts.append(header)
     for line in remarks:
         parts.append(line + "\n")
     parts.append(
         "REMARK 999 CA-ONLY EXPORT (FULL TEMPLATE NOT AVAILABLE).\n")
     serial = 1
-    out_res = 1
-    for target_idx, q_aa in _iter_matched_columns(alignment.gapped_sequence,
-                                                  alignment.gapped_target):
+    for query_res_num, q_aa, target_idx in _iter_query_columns(
+            alignment.gapped_sequence, alignment.gapped_target):
+        if target_idx is None:
+            continue
         if target_idx >= len(coords):
             logger.warning("Carved CA export: target_idx out of range for %s.",
                            alignment.query_name)
@@ -217,10 +274,9 @@ def _write_ca_only(alignment: AlignmentResult, path: Path, preamble: str,
         x, y, z = coords[target_idx]
         res3 = AA_1_TO_3.get(q_aa, "UNK")
         parts.append(
-            _atom_line(serial, "CA", res3, "A", out_res, float(x), float(y),
-                       float(z), 1.0, 0.0, "C"))
+            _atom_line(serial, "CA", res3, "A", query_res_num, float(x),
+                       float(y), float(z), 1.0, 0.0, "C"))
         serial += 1
-        out_res += 1
     parts.append("END\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(parts), encoding="utf-8")
@@ -229,7 +285,7 @@ def _write_ca_only(alignment: AlignmentResult, path: Path, preamble: str,
 def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
     raw: Optional[str] = None
     filetype = "pdb"
-    preamble = ""
+    template_preamble = ""
     template_label = alignment.target_name
 
     if alignment.template_path is not None:
@@ -243,19 +299,19 @@ def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
         else:
             filetype = "pdb"
         if filetype == "pdb":
-            preamble = extract_pdb_preamble(raw)
+            template_preamble = extract_pdb_preamble_without_seqres(raw)
     elif alignment.template_structure_string:
         raw = alignment.template_structure_string
         template_label = alignment.target_name
         filetype = alignment.template_filetype or "pdb"
         if filetype == "pdb":
-            preamble = extract_pdb_preamble(raw)
+            template_preamble = extract_pdb_preamble_without_seqres(raw)
 
     remarks = _remark_lines(alignment, template_label)
     chain = alignment.template_chain or "A"
 
     if raw is None or not chain:
-        _write_ca_only(alignment, path, preamble, remarks)
+        _write_ca_only(alignment, path, template_preamble, remarks)
         return
 
     thermal_lookup: Dict[ThermalKey, Tuple[float, float]] = {}
@@ -273,13 +329,14 @@ def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
                 "CA count mismatch for %s (%d CA vs target len %d); using CA "
                 "fallback.", alignment.query_name, len(ca_atoms),
                 len(alignment.target_sequence))
-            _write_ca_only(alignment, path, preamble, remarks)
+            _write_ca_only(alignment, path, template_preamble, remarks)
             return
 
         blocks: List[struc.AtomArray] = []
-        out_res = 1
-        for target_idx, q_aa in _iter_matched_columns(
+        for query_res_num, q_aa, target_idx in _iter_query_columns(
                 alignment.gapped_sequence, alignment.gapped_target):
+            if target_idx is None:
+                continue
             rid = ca_atoms.res_id[target_idx]
             ins = ca_atoms.ins_code[target_idx]
             cid = ca_atoms.chain_id[target_idx]
@@ -289,25 +346,26 @@ def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
             if _array_length(block) == 0:
                 logger.warning("Empty residue block at target_idx %d for %s.",
                                target_idx, alignment.query_name)
-                _write_ca_only(alignment, path, preamble, remarks)
+                _write_ca_only(alignment, path, template_preamble, remarks)
                 return
             _apply_thermal_from_pdb_lookup(block, thermal_lookup)
             res3 = AA_1_TO_3.get(q_aa, "UNK")
             block.res_name[:] = res3
-            block.res_id[:] = out_res
+            block.res_id[:] = query_res_num
             nb = _array_length(block)
             block.chain_id = np.array(["A"] * nb, dtype=block.chain_id.dtype)
             blocks.append(block)
-            out_res += 1
 
         if not blocks:
-            _write_ca_only(alignment, path, preamble, remarks)
+            _write_ca_only(alignment, path, template_preamble, remarks)
             return
 
         merged = struc.concatenate(blocks)
         parts: List[str] = []
-        if preamble:
-            parts.append(preamble)
+        header = _build_preamble_header(template_preamble,
+                                        alignment.query_sequence)
+        if header:
+            parts.append(header)
         for line in remarks:
             parts.append(line + "\n")
         parts.append(_write_atom_array_records(merged))
@@ -318,4 +376,4 @@ def write_carved_structure_pdb(alignment: AlignmentResult, path: Path) -> None:
         logger.warning(
             "Full-atom carved export failed for %s (%s); falling back to CA.",
             alignment.query_name, exc)
-        _write_ca_only(alignment, path, preamble, remarks)
+        _write_ca_only(alignment, path, template_preamble, remarks)
