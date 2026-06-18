@@ -477,7 +477,6 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                                  min_length=min_length,
                                  max_length=max_length)
 
-    # ── determine which queries already have user-supplied structures ──
     mapped_ids = set()
     if structure_mapping is not None:
         import csv as _csv
@@ -486,16 +485,15 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
                 if row and len(row) >= 2:
                     mapped_ids.add(row[0].strip())
 
-    # ── database search only for queries without mapped structures ─────
     unmapped_queries = {
         qid for qid in query_file.sequences if qid not in mapped_ids
     }
+    has_searchable_databases = bool(db_path) or not skip_pdb
 
     if unmapped_queries and mapped_ids:
-        # remove mapped sequences so MMseqs2 only processes unmapped ones
         query_file.remove_sequences(list(mapped_ids & set(query_file.sequences)))
 
-    if unmapped_queries:
+    if structure_mapping is None:
         deepfri_dbs = hierarchical_database_search(
             query_file=query_file,
             output_path=output_path / "database_search",
@@ -510,9 +508,32 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
             overwrite=overwrite,
             tmpdir=tmpdir,
             threads=threads)
+    elif unmapped_queries and has_searchable_databases:
+        deepfri_dbs = hierarchical_database_search(
+            query_file=query_file,
+            output_path=output_path / "database_search",
+            databases=db_path,
+            mmseqs_sensitivity=mmseqs_sensitivity,
+            min_bits=mmseqs_min_bitscore,
+            max_eval=mmseqs_max_evalue,
+            min_ident=mmseqs_min_identity,
+            min_coverage=mmseqs_min_coverage,
+            top_k=top_k,
+            skip_pdb=skip_pdb,
+            overwrite=overwrite,
+            tmpdir=tmpdir,
+            threads=threads)
+    elif unmapped_queries:
+        logger.info(
+            "%d sequence(s) in FASTA are absent from the structure-mapping CSV "
+            "and no databases are configured; they will be predicted with CNN: "
+            "%s",
+            len(unmapped_queries),
+            ", ".join(sorted(unmapped_queries)))
+        deepfri_dbs = []
     else:
         logger.info(
-            "All query sequences have user-supplied structures; "
+            "All query sequences are listed in the structure-mapping CSV; "
             "skipping database search.")
         deepfri_dbs = []
 

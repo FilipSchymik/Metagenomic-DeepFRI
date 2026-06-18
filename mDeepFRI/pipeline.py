@@ -466,8 +466,9 @@ def load_mapped_structures(
             structure_path = _resolve_structure_path(structure_ref, mapping_dir)
             if structure_path is None:
                 logger.warning(
-                    "Structure file not found for %s: %s", query_id,
-                    structure_ref)
+                    "Structure file not found for %s: %s; will predict with "
+                    "CNN if no database is configured.",
+                    query_id, structure_ref)
                 continue
 
             # ── determine chain and filetype ───────────────────────────
@@ -485,27 +486,26 @@ def load_mapped_structures(
             except KeyError as e:
                 logger.warning(
                     "Error extracting coordinates from %s: "
-                    "non-standard residue %s; %s skipped.", structure_path,
-                    str(e), query_id)
+                    "non-standard residue %s; %s will predict with CNN if no "
+                    "database is configured.", structure_path, str(e), query_id)
                 continue
             except ValueError as e:
                 logger.warning(
-                    "Error processing %s: %s; %s skipped.", structure_path,
-                    str(e), query_id)
+                    "Error processing %s: %s; %s will predict with CNN if no "
+                    "database is configured.", structure_path, str(e), query_id)
                 continue
             except TypeError as e:
                 # e.g. biotite PDB/mmCIF parse yields invalid stack shape
                 logger.warning(
                     "Structure load failed for query %s from %s: %s. "
-                    "Falling back to hierarchical database search if databases "
-                    "were configured; otherwise sequence-only (CNN) DeepFRI.",
+                    "Will predict with CNN if no database is configured.",
                     query_id, structure_path, e)
                 continue
 
             if sequence is None or coords is None:
                 logger.warning(
-                    "No coordinates found in %s; %s skipped.",
-                    structure_path, query_id)
+                    "No coordinates found in %s; %s will predict with CNN if "
+                    "no database is configured.", structure_path, query_id)
                 continue
 
             # ── check that query exists ────────────────────────────────
@@ -552,7 +552,15 @@ def load_mapped_structures(
         cmaps = list(p.map(partial_map_align, alignments_with_coords))
 
     # filter out failed contact maps
-    aligned_cmaps = [cmap for cmap in cmaps if cmap[1] is not None]
+    aligned_cmaps = []
+    for cmap in cmaps:
+        aln, contact_map = cmap
+        if contact_map is None:
+            logger.warning(
+                "Contact map alignment failed for %s; will predict with CNN if "
+                "no database is configured.", aln.query_name)
+        else:
+            aligned_cmaps.append(cmap)
 
     successfully_mapped = [aln.query_name for aln, _ in aligned_cmaps]
     logger.info(
@@ -702,7 +710,7 @@ def predict_protein_function(
 
     # ── user-supplied structure mappings (processed first) ─────────────
     if mapped_structures_csv is not None:
-        user_cmaps, user_mapped_ids = load_mapped_structures(
+        user_cmaps, _user_mapped_ids = load_mapped_structures(
             query_file=query_file,
             mapping_csv=mapped_structures_csv,
             angstrom_contact_threshold=angstrom_contact_threshold,
