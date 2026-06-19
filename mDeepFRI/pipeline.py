@@ -19,6 +19,7 @@ Attributes:
 
 import csv
 import logging
+import os
 from collections import defaultdict
 import pathlib
 import pickle
@@ -75,6 +76,42 @@ def _write_carved_structure_worker(
     """Picklable worker for parallel carved PDB export (``save_aligned_structures``)."""
     aln, out_path = args
     write_carved_structure_pdb(aln, out_path)
+
+
+def _carving_worker_count(n_tasks: int, threads: int) -> int:
+    """
+    Worker count for carved PDB export.
+
+    Each task writes a distinct ``{query_id}.pdb`` under ``aligned_structures/``,
+    so tasks are independent. When ``threads`` is 1 (the CLI default), use all
+    available CPU cores for carving only; pass ``-t`` to cap workers explicitly.
+    """
+    if n_tasks <= 1:
+        return 1
+    if threads > 1:
+        return min(n_tasks, threads)
+    return min(n_tasks, os.cpu_count() or 1)
+
+
+def _export_carved_structures(
+        carved_tasks: List[Tuple[AlignmentResult, pathlib.Path]],
+        threads: int) -> None:
+    """Write carved PDB fragments; parallelizes when more than one structure."""
+    if not carved_tasks:
+        return
+
+    workers = _carving_worker_count(len(carved_tasks), threads)
+    if workers <= 1:
+        _write_carved_structure_worker(carved_tasks[0])
+        return
+
+    logger.info(
+        "Writing %d carved structures (%d parallel workers).",
+        len(carved_tasks), workers)
+    chunksize = max(1, len(carved_tasks) // (workers * 4))
+    with Pool(workers) as pool:
+        pool.map(_write_carved_structure_worker, carved_tasks,
+                 chunksize=chunksize)
 
 
 def _raw_alignment_fasta_record(aln: AlignmentResult) -> str:
@@ -845,16 +882,7 @@ def predict_protein_function(
         as_dir.mkdir(parents=True, exist_ok=True)
         carved_tasks = [(aln, as_dir / f"{aln.query_name}.pdb")
                         for aln, _cmap in aligned_cmaps]
-        if carved_tasks:
-            if threads > 1:
-                logger.info(
-                    "Writing %d carved structures (%d parallel workers).",
-                    len(carved_tasks), threads)
-                with Pool(threads) as pool:
-                    pool.map(_write_carved_structure_worker, carved_tasks)
-            else:
-                for task in carved_tasks:
-                    _write_carved_structure_worker(task)
+        _export_carved_structures(carved_tasks, threads)
 
     aligned_queries = [aln[0].query_name for aln in aligned_cmaps]
     unaligned_queries = {
