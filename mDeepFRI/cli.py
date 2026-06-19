@@ -340,7 +340,8 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
 @click.option(
     "-w",
     "--weights",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True,
                     dir_okay=True,
                     file_okay=False,
@@ -353,8 +354,14 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
     default=["bp", "cc", "ec", "mf"],
     type=click.Choice(["bp", "cc", "ec", "mf"]),
     multiple=True,
-    help="Processing modes. Default is all"
+    help="Processing modes. Default is all "
     "(biological process, cellular component, enzyme comission, molecular function).",
+)
+@click.option(
+    "--skip-prediction",
+    default=False,
+    is_flag=True,
+    help="Skip DeepFRI function prediction; run alignment and structure export only.",
 )
 @click.option(
     "-a",
@@ -455,7 +462,7 @@ def search_databases(ctx, input, output, db_path, mmseqs_sensitivity,
 )
 @click.pass_context
 def predict_function(ctx, input, db_path, weights, output, processing_modes,
-                     angstrom_contact_thresh, generate_contacts,
+                     skip_prediction, angstrom_contact_thresh, generate_contacts,
                      mmseqs_sensitivity, mmseqs_min_bitscore,
                      mmseqs_max_evalue, mmseqs_min_identity,
                      mmseqs_min_coverage, top_k, alignment_gap_open,
@@ -467,6 +474,13 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
     """Predict protein function from sequence."""
 
     logger.info("Starting Metagenomic-DeepFRI.")
+
+    if not skip_prediction and weights is None:
+        raise UsageError("--weights is required unless --skip-prediction is set.")
+    if skip_prediction:
+        logger.info(
+            "Skipping function prediction; running alignment and structure "
+            "export only.")
 
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -524,12 +538,19 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
             tmpdir=tmpdir,
             threads=threads)
     elif unmapped_queries:
-        logger.info(
-            "%d sequence(s) in FASTA are absent from the structure-mapping CSV "
-            "and no databases are configured; they will be predicted with CNN: "
-            "%s",
-            len(unmapped_queries),
-            ", ".join(sorted(unmapped_queries)))
+        if skip_prediction:
+            logger.info(
+                "%d sequence(s) in FASTA are absent from the structure-mapping "
+                "CSV and no databases are configured: %s",
+                len(unmapped_queries),
+                ", ".join(sorted(unmapped_queries)))
+        else:
+            logger.info(
+                "%d sequence(s) in FASTA are absent from the structure-mapping "
+                "CSV and no databases are configured; they will be predicted "
+                "with CNN: %s",
+                len(unmapped_queries),
+                ", ".join(sorted(unmapped_queries)))
         deepfri_dbs = []
     else:
         logger.info(
@@ -551,6 +572,7 @@ def predict_function(ctx, input, db_path, weights, output, processing_modes,
         weights=weights,
         output_path=output_path,
         deepfri_processing_modes=processing_modes,
+        skip_prediction=skip_prediction,
         angstrom_contact_threshold=angstrom_contact_thresh,
         generate_contacts=generate_contacts,
         alignment_gap_open=alignment_gap_open,

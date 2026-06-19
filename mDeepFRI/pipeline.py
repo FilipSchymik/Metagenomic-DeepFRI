@@ -621,9 +621,10 @@ def _run_prediction_loop(predictor, data_iterable: iter, data_len: int,
 def predict_protein_function(
         query_file: QueryFile,
         databases: Tuple[Database],
-        weights: str,
+        weights: Optional[str],
         output_path: str,
         deepfri_processing_modes: List[str] = ["ec", "bp", "mf", "cc"],
+        skip_prediction: bool = False,
         angstrom_contact_threshold: float = 6,
         generate_contacts: int = 2,
         alignment_gap_open: float = 10,
@@ -648,11 +649,14 @@ def predict_protein_function(
     Args:
         query_file (QueryFile): Object containing query sequences.
         databases (Tuple[Database]): Tuple of database objects to search against.
-        weights (str): Path to folder containing DeepFRI model weights.
         output_path (str): Path to directory for saving results.
+        weights (str, optional): Path to folder containing DeepFRI model weights.
+            Required unless ``skip_prediction`` is True.
         deepfri_processing_modes (List[str], optional): List of modes to predict.
             Options: "ec", "bp", "mf", "cc".
             Defaults to ["ec", "bp", "mf", "cc"].
+        skip_prediction (bool, optional): If True, run alignment and structure
+            export only; skip DeepFRI function prediction. Defaults to False.
         angstrom_contact_threshold (float, optional): Distance threshold for contact maps.
             Defaults to 6.
         generate_contacts (int, optional): Gap for generating contact maps.
@@ -697,12 +701,18 @@ def predict_protein_function(
         load_mapped_structures: For user-supplied structure mapping.
     """
 
-    # load DeepFRI model
-    deepfri_models_config = load_deepfri_config(weights)
-    deepfri_processing_modes = _initialize_processing_modes(
-        deepfri_processing_modes, deepfri_models_config)
+    run_prediction = not skip_prediction
+    if run_prediction:
+        if weights is None:
+            raise ValueError(
+                "weights is required unless skip_prediction is True.")
+        deepfri_models_config = load_deepfri_config(weights)
+        deepfri_processing_modes = _initialize_processing_modes(
+            deepfri_processing_modes, deepfri_models_config)
+        weights = pathlib.Path(weights)
+    else:
+        logger.info("Skipping function prediction.")
 
-    weights = pathlib.Path(weights)
     output_path = pathlib.Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -887,6 +897,13 @@ def predict_protein_function(
             blocks = [_raw_alignment_fasta_record(aln) for aln in alns]
             fasta_path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
 
+    if not run_prediction:
+        if remove_intermediate:
+            for db in databases:
+                remove_intermediate_files([db.sequence_db, db.mmseqs_db])
+        logger.info("meta-DeepFRI finished successfully.")
+        return
+
     ### FUNCTION PREDICTION ###
     # sort cmaps by length of query sequence
     aligned_cmaps = sorted(aligned_cmaps,
@@ -894,11 +911,6 @@ def predict_protein_function(
     # sort unaligned queries by length
     unaligned_queries = dict(
         sorted(unaligned_queries.items(), key=lambda x: len(x[1])))
-
-    # output_file_name = output_path / "results.tsv"
-    # output_buffer = open(output_file_name, "w", encoding="utf-8")
-    # csv_writer = csv.writer(output_buffer, delimiter="\t")
-    # csv_writer.writerow(OUTPUT_HEADER)
 
     matrices = {}
     json_configs = {}
